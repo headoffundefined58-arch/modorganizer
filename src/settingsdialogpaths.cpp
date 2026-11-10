@@ -1,5 +1,6 @@
 #include "settingsdialogpaths.h"
 #include "gameprofileconfig.h"
+#include "vfscoreconfig.h"
 #include "shared/appconfig.h"
 #include "ui_settingsdialog.h"
 #include <iplugingame.h>
