@@ -9,7 +9,7 @@ name: Build MO2 core (VFS upgrade 0001 + 0002)
 
 on:
   push:
-    branches: [patched-core]
+    branches: [master, patched-core]
   workflow_dispatch:
 
 permissions:
