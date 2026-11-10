@@ -37,6 +37,9 @@ function Pin-Repo {
             Write-Output "WARNING: $($Folder.Name): checkout of $Sha failed"
         }
         else {
+            # usvfs (and others) carry git submodules such as asmjit/spdlog;
+            # switching the parent commit leaves them at the old pointers.
+            git submodule update --init --recursive --force 2>&1 | Out-Null
             Write-Output "pinned $($Folder.Name) -> $($Sha.Substring(0,12))"
         }
     }
