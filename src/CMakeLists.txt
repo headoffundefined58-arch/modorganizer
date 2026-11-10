@@ -128,6 +128,7 @@ mo2_add_filter(NAME src/loot GROUPS
 mo2_add_filter(NAME src/mainwindow GROUPS
 	datatab
 	downloadstab
+	entitypanel
 	iconfetcher
 	filetree
 	filetreeitem

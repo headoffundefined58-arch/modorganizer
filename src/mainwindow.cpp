@@ -28,6 +28,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include "downloadlist.h"
 #include "downloadstab.h"
 #include "editexecutablesdialog.h"
+#include "entitypanel.h"
 #include "envshortcut.h"
 #include "eventfilter.h"
 #include "executableinfo.h"
@@ -508,6 +509,26 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   refreshProfiles(false);
 
   ui->profileBox->setCurrentText(m_OrganizerCore.currentProfile()->name());
+
+  // MO2 core upgrade: optional, data-driven vanilla-entity panel. An
+  // instance without [VFSEntityPanel] drops the tab completely, so Bethesda
+  // instances keep exactly the tab layout they had before.
+  auto* entityPanel = new EntityPanel(&m_OrganizerCore, ui->entityTab);
+  ui->entityTab->layout()->addWidget(entityPanel);
+  if (!entityPanel->available()) {
+    ui->tabWidget->removeTab(ui->tabWidget->indexOf(ui->entityTab));
+  } else {
+    connect(m_OrganizerCore.modList(), &ModList::modStatesChanged, entityPanel,
+            [entityPanel](const QModelIndexList&) {
+              entityPanel->scheduleRefresh();
+            });
+    connect(m_OrganizerCore.modList(), &ModList::modPrioritiesChanged, entityPanel,
+            [entityPanel](const QModelIndexList&) {
+              entityPanel->scheduleRefresh();
+            });
+    connect(m_OrganizerCore.modList(), &QAbstractItemModel::modelReset, entityPanel,
+            [entityPanel]() { entityPanel->scheduleRefresh(); });
+  }
 
   if (settings.archiveParsing()) {
     ui->dataTabShowFromArchives->setCheckState(Qt::Checked);
@@ -2246,6 +2267,10 @@ void MainWindow::on_tabWidget_currentChanged(int index)
     m_DataTab->activated();
   } else if (currentWidget == ui->savesTab) {
     m_SavesTab->refreshSaveList();
+  } else if (currentWidget == ui->entityTab) {
+    if (auto* panel = ui->entityTab->findChild<EntityPanel*>()) {
+      panel->refresh();
+    }
   }
 }
 
