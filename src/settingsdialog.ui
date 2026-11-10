@@ -1008,13 +1008,13 @@ If you disable this feature, MO will only display official DLCs this way. Please
        <item>
         <widget class="QGroupBox" name="gameProfileGroup">
          <property name="title">
-          <string>Game Profile (instance-specific)</string>
+          <string>游戏专属配置（仅本实例）</string>
          </property>
          <layout class="QFormLayout" name="gameProfileForm">
           <item row="0" column="0">
            <widget class="QLabel" name="gpDataRootLabel">
             <property name="text">
-             <string>Virtual data root</string>
+             <string>虚拟数据根目录</string>
             </property>
            </widget>
           </item>
@@ -1024,7 +1024,7 @@ If you disable this feature, MO will only display official DLCs this way. Please
           <item row="1" column="0">
            <widget class="QLabel" name="gpBareDestLabel">
             <property name="text">
-             <string>Bare mod destination</string>
+             <string>裸包目标目录</string>
             </property>
            </widget>
           </item>
@@ -1034,7 +1034,7 @@ If you disable this feature, MO will only display official DLCs this way. Please
           <item row="2" column="0">
            <widget class="QLabel" name="gpBarePatternsLabel">
             <property name="text">
-             <string>Bare file patterns</string>
+             <string>裸包文件匹配规则</string>
             </property>
            </widget>
           </item>
@@ -1044,7 +1044,7 @@ If you disable this feature, MO will only display official DLCs this way. Please
           <item row="3" column="0">
            <widget class="QLabel" name="gpSaveDirLabel">
             <property name="text">
-             <string>Save directory</string>
+             <string>存档目录</string>
             </property>
            </widget>
           </item>
@@ -1054,7 +1054,7 @@ If you disable this feature, MO will only display official DLCs this way. Please
           <item row="4" column="0">
            <widget class="QLabel" name="gpSavePatternLabel">
             <property name="text">
-             <string>Save file pattern</string>
+             <string>存档文件匹配规则</string>
             </property>
            </widget>
           </item>
@@ -1064,14 +1064,14 @@ If you disable this feature, MO will only display official DLCs this way. Please
           <item row="5" column="1">
            <widget class="QCheckBox" name="gpSavePerProfileBox">
             <property name="text">
-             <string>Isolate saves per profile</string>
+             <string>按配置档案隔离存档</string>
             </property>
            </widget>
           </item>
           <item row="6" column="1">
            <widget class="QLabel" name="gpHelpLabel">
             <property name="text">
-             <string>Placeholders: ${GAME_ROOT} ${DATA_DIR} ${PUBLIC_DOCUMENTS} ${LOCALAPPDATA} ${USERPROFILE}. Leave empty to use the game plugin's defaults (no effect on Bethesda instances).</string>
+             <string>可用占位符：${GAME_ROOT}、${DATA_DIR}、${PUBLIC_DOCUMENTS}、${LOCALAPPDATA}、${USERPROFILE}。留空则使用游戏插件默认值。</string>
             </property>
             <property name="wordWrap">
              <bool>true</bool>

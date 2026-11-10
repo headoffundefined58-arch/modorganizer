@@ -88,6 +88,42 @@ PathsSettingsTab::PathsSettingsTab(Settings& s, SettingsDialog& d)
     ui->gpSavePerProfileBox->setChecked(
         gp.value("VFSGameProfile/save_per_profile", false).toBool());
   }
+
+  // MO2 core upgrade: hide the generic path rows this game does not
+  // have. The line edits keep their original values, so update() cannot
+  // change any setting when a row is hidden. Instances without the
+  // [VFSUIPaths] section keep every row (zero impact on Skyrim).
+  const QStringList hiddenRows = gameProfileHiddenPathFields();
+  const auto hidden = [&hiddenRows](const char* id) {
+    return hiddenRows.contains(QString::fromUtf8(id));
+  };
+  if (hidden("base")) {
+    ui->label_25->hide(); ui->baseDirEdit->hide(); ui->browseBaseDirBtn->hide();
+  }
+  if (hidden("downloads")) {
+    ui->label_7->hide(); ui->downloadDirEdit->hide(); ui->browseDownloadDirBtn->hide();
+  }
+  if (hidden("mods")) {
+    ui->label_8->hide(); ui->modDirEdit->hide(); ui->browseModDirBtn->hide();
+  }
+  if (hidden("cache")) {
+    ui->label_9->hide(); ui->cacheDirEdit->hide(); ui->browseCacheDirBtn->hide();
+  }
+  if (hidden("profiles")) {
+    ui->label_22->hide(); ui->profilesDirEdit->hide(); ui->browseProfilesDirBtn->hide();
+  }
+  if (hidden("overwrite")) {
+    ui->label_24->hide(); ui->overwriteDirEdit->hide(); ui->browseOverwriteDirBtn->hide();
+  }
+  if (hidden("managedGame")) {
+    ui->label_29->hide(); ui->managedGameDirEdit->hide(); ui->browseGameDirBtn->hide();
+  }
+  if (hidden("baseDirHint")) {
+    ui->label_26->hide();
+  }
+  if (hidden("writableHint")) {
+    ui->label_23->hide();
+  }
 }
 
 void PathsSettingsTab::update()

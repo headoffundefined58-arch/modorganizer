@@ -466,22 +466,23 @@ void DirectoryRefresher::refresh()
 
     IPluginGame* game = qApp->property("managed_game").value<IPluginGame*>();
 
-    // MO2 core upgrade: keep the virtual directory tree in sync with
-    // the instance's declared data root, so the Data tab (conflicts,
-    // overwrite flags) matches what the launched game actually sees.
+    // MO2 core upgrade: data_root_override is a virtual *destination*
+    // for mod files, not a data source to enumerate. Games without a
+    // Bethesda-style Data folder use their whole installation as the VFS
+    // target, and that tree contains USVFS-created directories (for
+    // example data_win32/spc). Walking it from the refresher recurses
+    // through the VFS hooks and hangs MO2 right after the UI unlocks.
+    // The Data tab only needs the mod and overwrite origins.
     const QDir gameRoot(game->gameDirectory().absolutePath());
     const QDir dataDir(game->dataDirectory().absolutePath());
-    const VFSCoreConfig& vfsConfig = vfsCoreCachedConfig(gameRoot, dataDir);
-    const QString effectiveDataDir = vfsConfig.dataRootOverride.isEmpty()
-                                         ? dataDir.absolutePath()
-                                         : vfsConfig.dataRootOverride;
+    const VFSCoreConfig vfsConfig = vfsCoreCachedConfig(gameRoot, dataDir);
 
-    std::wstring dataDirectory =
-        QDir::toNativeSeparators(effectiveDataDir).toStdWString();
-
-    {
+    if (vfsConfig.dataRootOverride.isEmpty()) {
       DirectoryStats dummy;
-      m_Root->addFromOrigin(L"data", dataDirectory, 0, dummy);
+      m_Root->addFromOrigin(
+          L"data",
+          QDir::toNativeSeparators(dataDir.absolutePath()).toStdWString(), 0,
+          dummy);
     }
 
     for (auto directory : game->secondaryDataDirectories().toStdMap()) {

@@ -101,6 +101,19 @@ inline QString gameProfileIniPath()
   return instance ? instance->iniPath() : QString();
 }
 
+// [VFSUIPaths] hidden_fields lists generic path rows this game has no
+// use for. Purely presentational: an absent or empty value shows every
+// row, so Bethesda instances are completely unaffected.
+inline QStringList gameProfileHiddenPathFields()
+{
+  const QString iniPath = gameProfileIniPath();
+  if (iniPath.isEmpty()) {
+    return {};
+  }
+  QSettings ini(iniPath, QSettings::IniFormat);
+  return gpSplitList(ini.value("VFSUIPaths/hidden_fields").toString());
+}
+
 inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
                                                const QDir& dataDir)
 {
