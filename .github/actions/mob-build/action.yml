@@ -1,0 +1,143 @@
+name: Build with mob (v2.5.2 pinned)
+description: Vendored copy of build-with-mob-action@0921f0c1f19b with deprecated actions upgraded and mob pinned to the v2.5.2 tag.
+
+inputs:
+  mo2-owner:
+    description: Owner to use to build.
+    required: false
+    default: ${{ github.repository_owner }}
+  mo2-branch:
+    description: Branch/tag used when switching MO2 dependency repositories.
+    required: false
+    default: ${{ github.head_ref || github.ref_name }}
+  mob-ref:
+    description: mob repository ref; pinned so Qt/Python/pybind11 versions match MO2 2.5.2.
+    required: false
+    default: v2.5.2
+  mo2-third-parties:
+    description: List of third-party dependencies to build (including USVFS).
+    required: false
+    default: ""
+  mo2-dependencies:
+    description: List of MO2 dependencies to build.
+    required: false
+    default: ""
+  mo2-cmake-command:
+    description: MO2 CMake command to run.
+    required: false
+    default: ".."
+  qt-install:
+    description: Whether to install Qt or not.
+    required: false
+    default: "true"
+  qt-version:
+    description: Override Qt version to install.
+    required: false
+    default: ""
+  qt-modules:
+    description: List of Qt modules to install.
+    required: false
+    default: ""
+
+outputs:
+  working-directory:
+    description: Working directory containing the vsbuild folder.
+    value: ./build/modorganizer_super/${{ github.event.repository.name }}
+
+runs:
+  using: "composite"
+  steps:
+    # mob - pinned to the exact tag used by the 2.5.2 release (Qt 6.7.1,
+    # Python 3.12.3, pybind11 2.12.0). mob/master now uses Qt 6.11 and would
+    # produce a binary that is ABI-incompatible with a local 2.5.2 install.
+    - name: Checkout mob
+      uses: actions/checkout@v4
+      with:
+        repository: ModOrganizer2/mob
+        ref: ${{ inputs.mob-ref }}
+        path: ./mob
+    - name: Cache mob
+      id: cache-mob
+      uses: actions/cache@v4
+      with:
+        path: ./mob/mob.exe
+        key: ${{ runner.OS }}-mob-${{ inputs.mob-ref }}
+    - if: steps.cache-mob.outputs.cache-hit != 'true'
+      name: Build mob
+      shell: pwsh
+      run: .\mob\bootstrap.ps1
+    - name: Add mob to PATH
+      shell: pwsh
+      run: echo "${{ github.workspace }}/mob" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    # Qt
+    - name: Get Qt version
+      id: find-qt-version
+      shell: pwsh
+      run: |
+        $version = "${{ inputs.qt-version }}"
+        if (!$version) {
+          $version = (Get-Content "${{ github.workspace }}\mob\mob.ini" | Select-String -Raw "^qt\s+=").Split("= ")[1]
+        }
+        Write-Output "Found Qt Version: $version"
+        Write-Output "QT_VERSION=$version" >> "$env:GITHUB_OUTPUT"
+    - if: inputs.qt-install == 'true'
+      name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: ${{ steps.find-qt-version.outputs.QT_VERSION }}
+        arch: win64_msvc2019_64
+        modules: ${{ inputs.qt-modules }}
+        cache: true
+    - name: Add Qt bins to PATH
+      shell: pwsh
+      run: echo "$env:QT_ROOT_DIR/msvc2019_64/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    # Third-Party dependencies
+    - name: Cache third-party dependencies
+      id: cache-dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ./build
+          !./build/modorganizer_super
+        key: ${{ runner.OS }}-mo2-252-deps-${{ inputs.mob-ref }}
+    - if: steps.cache-dependencies.outputs.cache-hit != 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    - if: steps.cache-dependencies.outputs.cache-hit != 'true'
+      id: build-third-party-deps
+      shell: pwsh
+      run: |
+        pip install PyYAML
+        $third_parties = (python ${env:GITHUB_ACTION_PATH}/make-dependencies.py ${{ inputs.mo2-dependencies }})
+        Write-Output "Found third parties dependencies: ${third_parties}"
+        Write-Output "MO2_THIRD_PARTIES=${third_parties}" >> "$env:GITHUB_OUTPUT"
+    - if: steps.cache-dependencies.outputs.cache-hit != 'true'
+      shell: pwsh
+      name: Build dependencies with mob
+      run: mob.exe -l 4 -d . build ${{ steps.build-third-party-deps.outputs.MO2_THIRD_PARTIES }} ${{ inputs.mo2-third-parties }}
+    - name: Build dependencies log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-dependencies-log
+        path: mob.log
+        if-no-files-found: ignore
+
+    # MO2 dependencies
+    - name: Build MO2 modules
+      shell: pwsh
+      run: '& ${env:GITHUB_ACTION_PATH}/build-mo2-dependencies.ps1 -Owner ${{ inputs.mo2-owner }} -Branch ${{ inputs.mo2-branch }} "${{ inputs.mo2-dependencies }}"'
+
+    # build repository (the patched fork, at the workflow ref)
+    - uses: actions/checkout@v4
+      with:
+        path: ./build/modorganizer_super/${{ github.event.repository.name }}
+    - name: Build ModOrganizer
+      shell: pwsh
+      run: |
+        mob -l 4 cmake -c "${{ inputs.mo2-cmake-command }}" vsbuild
+        cmake --build vsbuild --config RelWithDebInfo -j4
+      working-directory: ./build/modorganizer_super/${{ github.event.repository.name }}

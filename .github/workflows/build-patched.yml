@@ -1,9 +1,9 @@
 # Build the patched MO2 core (v2.5.2 + 0001 + 0002) and publish the exe.
 #
-# build-with-mob-action checks out THIS repository (the fork) into
-# build/<repo-name> and compiles it, so the committed patches are what gets
-# built. The upstream action itself does NOT upload anything, hence the
-# explicit upload-artifact step below.
+# The build action is vendored (.github/actions/mob-build) and pinned to the
+# 2.5.2-era mob tag, so the produced exe links against exactly the same
+# Qt/Python/pybind11 ABI as a stock MO2 2.5.2 install. The upstream action
+# itself does NOT upload anything, hence the explicit upload-artifact step.
 
 name: Build MO2 core (VFS upgrade 0001 + 0002)
 
@@ -13,8 +13,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: read
+  contents: read
+  actions: write
 
 jobs:
   verify:
@@ -39,9 +39,15 @@ jobs:
     needs: verify
     runs-on: windows-2022
     steps:
+      - uses: actions/checkout@v4
+
       - name: Build patched ModOrganizer 2
-        uses: ModOrganizer2/build-with-mob-action@master
+        uses: ./.github/actions/mob-build
         with:
+          mo2-owner: ModOrganizer2
+          mo2-branch: v2.5.2
+          mob-ref: v2.5.2
+          qt-version: 6.7.1
           qt-modules: qtpositioning qtwebchannel qtwebengine qtwebsockets
           mo2-third-parties: >-
             7z zlib gtest libbsarch libloot openssl bzip2 python lz4 spdlog
@@ -55,9 +61,14 @@ jobs:
         run: |
           set -e
           mkdir -p dist
+          echo "candidate executables:"
           find . -type f -name 'ModOrganizer.exe' -print
-          find . -type f -name 'ModOrganizer.exe' -exec cp {} dist/ModOrganizer.exe \;
-          test -f dist/ModOrganizer.exe || { echo "ModOrganizer.exe not found"; exit 1; }
+          exe=$(find . -type f -name 'ModOrganizer.exe' -print | grep -i vsbuild | head -1)
+          if [ -z "$exe" ]; then
+            exe=$(find . -type f -name 'ModOrganizer.exe' -print | head -1)
+          fi
+          test -n "$exe" || { echo "ModOrganizer.exe not found"; exit 1; }
+          cp "$exe" dist/ModOrganizer.exe
           ls -l dist/ModOrganizer.exe
 
       - name: Upload patched executable
