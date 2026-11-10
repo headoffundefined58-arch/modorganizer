@@ -153,8 +153,7 @@ PathsSettingsTab::PathsSettingsTab(Settings& s, SettingsDialog& d)
 
   // Instances without a game profile (Skyrim, Fallout, ...) must not see the
   // game-profile group at all.
-  IPluginGame* game = settings().game().plugin();
-  if (game != nullptr) {
+  if (auto* game = settings().game().plugin()) {
     const QDir gameRoot(game->gameDirectory().absolutePath());
     if (gameProfileSnapshot(gameRoot, game->dataDirectory()).isEmpty()) {
       ui->gameProfileGroup->hide();
