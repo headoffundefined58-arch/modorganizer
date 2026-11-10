@@ -18,7 +18,6 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QJsonValue>
-#include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSettings>
@@ -36,33 +35,68 @@ struct ModFiles
 };
 
 const int kMaxFilesPerMod = 20000;
+
+// Rank stored in Qt::UserRole of the status column: 0 = several mods,
+// 1 = one mod, 2 = pristine. Sorting by that column therefore puts the
+// modified entries first (ascending) or last (descending).
+const int kRankMulti = 0;
+const int kRankModified = 1;
+const int kRankOriginal = 2;
+
+const int kRoleRank = Qt::UserRole + 1;
+const int kRoleMod = Qt::UserRole + 2;
+const int kRoleEntityId = Qt::UserRole + 3;
+
+// Lets the status column sort by rank instead of by its localized text.
+class EntityItem : public QTreeWidgetItem
+{
+public:
+  explicit EntityItem(QTreeWidget* parent) : QTreeWidgetItem(parent) {}
+  explicit EntityItem(QTreeWidgetItem* parent) : QTreeWidgetItem(parent) {}
+
+  bool operator<(const QTreeWidgetItem& other) const override
+  {
+    QTreeWidget* tree = treeWidget();
+    const int column  = tree != nullptr ? tree->sortColumn() : 0;
+    const QVariant mine = data(column, kRoleRank);
+    const QVariant theirs = other.data(column, kRoleRank);
+    if (mine.isValid() && theirs.isValid()) {
+      return mine.toInt() < theirs.toInt();
+    }
+    return QTreeWidgetItem::operator<(other);
+  }
+};
 }  // namespace
 
 EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
     : QWidget(parent), m_core(core)
 {
   auto* root = new QVBoxLayout(this);
-  root->setContentsMargins(6, 6, 6, 0);
-  root->setSpacing(4);
-
-  auto* bar = new QHBoxLayout();
-  bar->setSpacing(4);
-  m_filter = new QLineEdit(this);
-  m_filter->setClearButtonEnabled(true);
-  m_refreshButton = new QPushButton(this);
-  bar->addWidget(m_filter, 1);
-  bar->addWidget(m_refreshButton);
-  root->addLayout(bar);
-
-  m_summary = new QLabel(this);
-  root->addWidget(m_summary);
+  root->setContentsMargins(0, 0, 0, 0);
+  root->setSpacing(2);
 
   m_tree = new QTreeWidget(this);
   m_tree->setAlternatingRowColors(true);
   m_tree->setUniformRowHeights(true);
   m_tree->setRootIsDecorated(true);
-  m_tree->setSortingEnabled(false);
+  m_tree->setSortingEnabled(true);
+  m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
+  m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
   root->addWidget(m_tree, 1);
+
+  // Filter lives at the bottom right, mirroring MO2's own filter bars.
+  auto* bottom = new QHBoxLayout();
+  bottom->setContentsMargins(0, 0, 0, 0);
+  bottom->setSpacing(4);
+  bottom->addStretch(1);
+  m_filter = new QLineEdit(this);
+  m_filter->setClearButtonEnabled(true);
+  m_filter->setMinimumWidth(160);
+  m_filter->setMaximumWidth(260);
+  m_refreshButton = new QPushButton(this);
+  bottom->addWidget(m_filter);
+  bottom->addWidget(m_refreshButton);
+  root->addLayout(bottom);
 
   m_debounce = new QTimer(this);
   m_debounce->setSingleShot(true);
@@ -72,6 +106,8 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refresh(); });
   connect(m_filter, &QLineEdit::textChanged, this,
           [this](const QString& text) { applyFilter(text); });
+  connect(m_tree, &QTreeWidget::itemSelectionChanged, this,
+          [this]() { currentEntityChanged(); });
 
   m_available = loadCatalog();
   if (!m_available) {
@@ -81,14 +117,27 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   m_filter->setPlaceholderText(label("filter", "Filter..."));
   m_refreshButton->setText(label("refresh", "Refresh"));
   if (m_columns.isEmpty()) {
-    m_columns = QStringList{"Name", "Status", "Mods", "Code"};
+    m_columns = QStringList{"Name", "Status", "Code"};
   }
   m_tree->setColumnCount(m_columns.size());
   m_tree->setHeaderLabels(m_columns);
   if (QHeaderView* header = m_tree->header()) {
     header->setSectionResizeMode(0, QHeaderView::Stretch);
+    header->setSortIndicator(0, Qt::AscendingOrder);
   }
   refresh();
+}
+
+EntityPanel::~EntityPanel()
+{
+  if (m_debounce != nullptr) {
+    m_debounce->stop();
+  }
+}
+
+void EntityPanel::setModActivatedHandler(std::function<void(const QString&)> handler)
+{
+  m_onModActivated = std::move(handler);
 }
 
 QString EntityPanel::label(const QString& key, const QString& fallback) const
@@ -161,13 +210,6 @@ bool EntityPanel::loadCatalog()
   return !m_groups.isEmpty();
 }
 
-EntityPanel::~EntityPanel()
-{
-  if (m_debounce != nullptr) {
-    m_debounce->stop();
-  }
-}
-
 void EntityPanel::scheduleRefresh()
 {
   if (m_available) {
@@ -182,9 +224,9 @@ void EntityPanel::refresh()
     return;
   }
 
-  // MO2 writes the enabled state in <profile>/modlist.txt as "+Name" /
-  // "-Name". Reading it keeps this panel independent of the model internals
-  // and never touches the mod list itself.
+  // MO2 writes the enabled state in <profile>/modlist.txt as "+Name" / "-Name".
+  // Reading it keeps this panel independent of the model internals and never
+  // touches the mod list itself.
   QStringList enabledMods;
   if (const Profile* profile = core->currentProfile()) {
     QFile modlist(profile->getModlistFileName());
@@ -220,6 +262,8 @@ void EntityPanel::refresh()
   }
 
   QHash<QString, QVector<EntityModHit>> hits;
+  m_entityMods.clear();
+  m_modToEntity.clear();
   for (const EntityGroup& group : m_groups) {
     for (const EntityEntry& entity : group.entries) {
       QVector<EntityModHit> contributions;
@@ -246,17 +290,28 @@ void EntityPanel::refresh()
         }
       }
       if (!contributions.isEmpty()) {
-        hits.insert(group.id + "/" + entity.id, contributions);
+        hits.insert(entity.id, contributions);
+        QStringList names;
+        for (const EntityModHit& hit : contributions) {
+          names.append(hit.modName);
+          if (!m_modToEntity.contains(hit.modName)) {
+            m_modToEntity.insert(hit.modName, entity.id);
+          }
+        }
+        m_entityMods.insert(entity.id, names);
       }
     }
   }
 
+  const int sortColumn = m_tree->header() != nullptr ? m_tree->sortColumn() : 0;
+  const Qt::SortOrder sortOrder =
+      m_tree->header() != nullptr ? m_tree->header()->sortIndicatorOrder()
+                                  : Qt::AscendingOrder;
+  m_tree->setSortingEnabled(false);
   m_tree->clear();
-  int total = 0;
-  int modified = 0;
 
   for (const EntityGroup& group : m_groups) {
-    QTreeWidgetItem* groupItem = new QTreeWidgetItem(m_tree);
+    auto* groupItem = new QTreeWidgetItem(m_tree);
     groupItem->setText(0, group.name);
     QFont groupFont = groupItem->font(0);
     groupFont.setBold(true);
@@ -265,48 +320,45 @@ void EntityPanel::refresh()
 
     int groupModified = 0;
     for (const EntityEntry& entity : group.entries) {
-      ++total;
-      QTreeWidgetItem* item = new QTreeWidgetItem(groupItem);
+      auto* item = new EntityItem(groupItem);
       item->setText(0, entity.name);
-      item->setText(3, entity.id);
+      item->setText(2, entity.id);
+      item->setData(0, kRoleEntityId, entity.id);
 
-      const QVector<EntityModHit> contributions =
-          hits.value(group.id + "/" + entity.id);
+      const QVector<EntityModHit> contributions = hits.value(entity.id);
       if (contributions.isEmpty()) {
         item->setText(1, label("original", "Original"));
+        item->setData(1, kRoleRank, kRankOriginal);
         continue;
       }
 
-      ++modified;
       ++groupModified;
-      QStringList names;
-      for (const EntityModHit& hit : contributions) {
-        names.append(hit.modName);
-      }
-      item->setText(2, names.join(", "));
-
       if (contributions.size() == 1) {
         item->setText(1, label("modified", "Modified"));
+        item->setData(1, kRoleRank, kRankModified);
         item->setForeground(1, QBrush(QColor(255, 183, 77)));
       } else {
         item->setText(1, QString("%1 (%2)")
                              .arg(label("multi", "Multiple mods"))
                              .arg(contributions.size()));
+        item->setData(1, kRoleRank, kRankMulti);
         item->setForeground(1, QBrush(QColor(239, 83, 80)));
         QFont statusFont = item->font(1);
         statusFont.setBold(true);
         item->setFont(1, statusFont);
       }
+      item->setData(0, kRoleMod, contributions.first().modName);
 
-      // One child per contributing mod: multi-mod overrides stay readable.
+      // One child per contributing mod so multi-mod overrides stay readable.
       for (const EntityModHit& hit : contributions) {
-        QTreeWidgetItem* child = new QTreeWidgetItem(item);
+        auto* child = new EntityItem(item);
         child->setText(0, hit.modName);
         child->setText(1, label("fromMod", "From"));
         child->setText(2, QString("%1: %2")
                               .arg(label("files", "Files"))
                               .arg(hit.fileCount));
-        child->setText(3, hit.sampleFiles.join(", "));
+        child->setData(0, kRoleMod, hit.modName);
+        child->setToolTip(2, hit.sampleFiles.join("\n"));
       }
     }
     if (m_tree->columnCount() > 1) {
@@ -316,12 +368,50 @@ void EntityPanel::refresh()
     }
   }
 
-  QString summary = label("summary", "{total} entries, {modified} modified");
-  summary.replace("{total}", QString::number(total));
-  summary.replace("{modified}", QString::number(modified));
-  m_summary->setText(summary);
-
+  m_tree->setSortingEnabled(true);
+  m_tree->sortItems(sortColumn, sortOrder);
   applyFilter(m_filter->text());
+}
+
+void EntityPanel::focusEntityForMod(const QString& modName)
+{
+  if (!m_available || modName.isEmpty()) {
+    return;
+  }
+  const QString entityId = m_modToEntity.value(modName);
+  if (entityId.isEmpty()) {
+    return;
+  }
+
+  for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
+    QTreeWidgetItem* group = m_tree->topLevelItem(g);
+    for (int e = 0; e < group->childCount(); ++e) {
+      QTreeWidgetItem* item = group->child(e);
+      if (item->data(0, kRoleEntityId).toString() != entityId) {
+        continue;
+      }
+      group->setExpanded(true);
+      item->setHidden(false);
+      m_tree->setCurrentItem(item);
+      m_tree->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+      return;
+    }
+  }
+}
+
+void EntityPanel::currentEntityChanged()
+{
+  if (!m_available || !m_onModActivated) {
+    return;
+  }
+  QTreeWidgetItem* item = m_tree->currentItem();
+  if (item == nullptr) {
+    return;
+  }
+  const QString mod = item->data(0, kRoleMod).toString();
+  if (!mod.isEmpty()) {
+    m_onModActivated(mod);
+  }
 }
 
 void EntityPanel::applyFilter(const QString& text)
@@ -335,11 +425,10 @@ void EntityPanel::applyFilter(const QString& text)
     int visible = 0;
     for (int e = 0; e < group->childCount(); ++e) {
       QTreeWidgetItem* item = group->child(e);
-      const bool match =
-          needle.isEmpty() ||
-          item->text(0).contains(needle, Qt::CaseInsensitive) ||
-          item->text(2).contains(needle, Qt::CaseInsensitive) ||
-          item->text(3).contains(needle, Qt::CaseInsensitive);
+      const bool match = needle.isEmpty() ||
+                         item->text(0).contains(needle, Qt::CaseInsensitive) ||
+                         item->text(1).contains(needle, Qt::CaseInsensitive) ||
+                         item->text(2).contains(needle, Qt::CaseInsensitive);
       item->setHidden(!match);
       if (match) {
         ++visible;

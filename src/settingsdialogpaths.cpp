@@ -5,6 +5,7 @@
 #include "ui_settingsdialog.h"
 #include <iplugingame.h>
 #include <QSettings>
+#include <QSizePolicy>
 
 PathsSettingsTab::PathsSettingsTab(Settings& s, SettingsDialog& d)
     : SettingsTab(s, d), m_gameDir(settings().game().plugin()->gameDirectory())
@@ -97,32 +98,67 @@ PathsSettingsTab::PathsSettingsTab(Settings& s, SettingsDialog& d)
   const auto hidden = [&hiddenRows](const char* id) {
     return hiddenRows.contains(QString::fromUtf8(id));
   };
+  // Removing the widgets from the grid (not just hiding them) collapses the
+  // empty rows; hiding alone leaves a large gap before "Managed Game".
+  const auto hideRow = [this](std::initializer_list<QWidget*> widgets) {
+    for (QWidget* widget : widgets) {
+      if (widget == nullptr) {
+        continue;
+      }
+      ui->gridLayout_2->removeWidget(widget);
+      widget->hide();
+    }
+  };
+  bool anyRowHidden = false;
   if (hidden("base")) {
-    ui->label_25->hide(); ui->baseDirEdit->hide(); ui->browseBaseDirBtn->hide();
+    hideRow({ui->label_25, ui->baseDirEdit, ui->browseBaseDirBtn});
+    anyRowHidden = true;
   }
   if (hidden("downloads")) {
-    ui->label_7->hide(); ui->downloadDirEdit->hide(); ui->browseDownloadDirBtn->hide();
+    hideRow({ui->label_7, ui->downloadDirEdit, ui->browseDownloadDirBtn});
+    anyRowHidden = true;
   }
   if (hidden("mods")) {
-    ui->label_8->hide(); ui->modDirEdit->hide(); ui->browseModDirBtn->hide();
+    hideRow({ui->label_8, ui->modDirEdit, ui->browseModDirBtn});
+    anyRowHidden = true;
   }
   if (hidden("cache")) {
-    ui->label_9->hide(); ui->cacheDirEdit->hide(); ui->browseCacheDirBtn->hide();
+    hideRow({ui->label_9, ui->cacheDirEdit, ui->browseCacheDirBtn});
+    anyRowHidden = true;
   }
   if (hidden("profiles")) {
-    ui->label_22->hide(); ui->profilesDirEdit->hide(); ui->browseProfilesDirBtn->hide();
+    hideRow({ui->label_22, ui->profilesDirEdit, ui->browseProfilesDirBtn});
+    anyRowHidden = true;
   }
   if (hidden("overwrite")) {
-    ui->label_24->hide(); ui->overwriteDirEdit->hide(); ui->browseOverwriteDirBtn->hide();
+    hideRow({ui->label_24, ui->overwriteDirEdit, ui->browseOverwriteDirBtn});
+    anyRowHidden = true;
   }
   if (hidden("managedGame")) {
-    ui->label_29->hide(); ui->managedGameDirEdit->hide(); ui->browseGameDirBtn->hide();
+    hideRow({ui->label_29, ui->managedGameDirEdit, ui->browseGameDirBtn});
+    anyRowHidden = true;
   }
   if (hidden("baseDirHint")) {
-    ui->label_26->hide();
+    hideRow({ui->label_26});
+    anyRowHidden = true;
   }
   if (hidden("writableHint")) {
-    ui->label_23->hide();
+    hideRow({ui->label_23});
+    anyRowHidden = true;
+  }
+  if (anyRowHidden) {
+    ui->verticalSpacer_7->changeSize(0, 0, QSizePolicy::Minimum, QSizePolicy::Minimum);
+    ui->gridLayout_2->invalidate();
+  }
+
+  // Instances without a game profile (Skyrim, Fallout, ...) must not see the
+  // game-profile group at all.
+  IPluginGame* game = settings().game().plugin();
+  if (game != nullptr) {
+    const QDir gameRoot(game->gameDirectory().absolutePath());
+    if (gameProfileSnapshot(gameRoot, game->dataDirectory()).isEmpty()) {
+      ui->gameProfileGroup->hide();
+    }
   }
 }
 

@@ -527,6 +527,27 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
       ui->tabWidget->setTabVisible(hiddenIndex, false);
     }
   } else {
+    // Bidirectional navigation: selecting a mod scrolls the panel to the
+    // entity it overrides; selecting an entity selects its mod.
+    entityPanel->setModActivatedHandler([this](const QString& modName) {
+      const int index = ModInfo::getIndex(modName);
+      if (index < 0) {
+        return;
+      }
+      const QModelIndex mi = ui->modList->model()->index(index, 0);
+      if (mi.isValid()) {
+        ui->modList->setCurrentIndex(mi);
+        ui->modList->scrollTo(mi, QAbstractItemView::PositionAtCenter);
+      }
+    });
+    if (QItemSelectionModel* selection = ui->modList->selectionModel()) {
+      connect(selection, &QItemSelectionModel::currentChanged, entityPanel,
+              [entityPanel](const QModelIndex& current, const QModelIndex&) {
+                if (current.isValid()) {
+                  entityPanel->focusEntityForMod(current.data().toString());
+                }
+              });
+    }
     connect(m_OrganizerCore.modList(), &ModList::modStatesChanged, entityPanel,
             [entityPanel](const QModelIndexList&) {
               entityPanel->scheduleRefresh();

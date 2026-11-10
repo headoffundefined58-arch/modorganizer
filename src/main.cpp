@@ -9,6 +9,7 @@
 #include "thread_utils.h"
 #include <log.h>
 #include <report.h>
+#include <QProcess>
 
 using namespace MOBase;
 
@@ -126,12 +127,23 @@ int run(int argc, char* argv[])
       const auto r = app.run(multiProcess);
 
       if (r == RestartExitCode) {
-        // resets things when MO is "restarted"
+        // A restart must be a brand new process. Restarting in-process leaves
+        // Python plugins (their mobase pybind objects) and Qt singletons half
+        // torn down, which crashed when switching instances.
         app.resetForRestart();
 
-        // don't reprocess command line
-        cl.clear();
+        QStringList args = QCoreApplication::arguments();
+        if (!args.isEmpty()) {
+          args.removeFirst();
+        }
+        qint64 childPid = 0;
+        if (QProcess::startDetached(QCoreApplication::applicationFilePath(), args,
+                                    QCoreApplication::applicationDirPath(), &childPid)) {
+          return 0;
+        }
 
+        // Fall back to the in-process restart if spawning failed.
+        cl.clear();
         continue;
       }
 

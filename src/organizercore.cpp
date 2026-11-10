@@ -2128,6 +2128,14 @@ std::vector<Mapping> OrganizerCore::fileMapping(const QString& profileName,
   }
 
   if (m_CurrentProfile->localSavesEnabled()) {
+    // MO2 core upgrade: seed the profile's saves folder once for games whose
+    // real save directory is declared by the instance. BasicLocalSavegames
+    // already maps <profile>/saves, but without seeding the folder stays empty:
+    // the Saves tab lists nothing and its context menu never appears.
+    if (gameProfile.savePerProfile && gameProfile.seedSaves &&
+        !gameProfile.saveSource.isEmpty()) {
+      gameProfileSeedSaves(currentProfile()->savePath(), gameProfile);
+    }
     auto localSaves = gameFeatures().gameFeature<LocalSavegames>();
     if (localSaves != nullptr) {
       MappingType saveMap =
