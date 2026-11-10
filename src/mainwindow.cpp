@@ -528,6 +528,12 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
             });
     connect(m_OrganizerCore.modList(), &QAbstractItemModel::modelReset, entityPanel,
             [entityPanel]() { entityPanel->scheduleRefresh(); });
+    connect(ui->tabWidget, &QTabWidget::currentChanged, entityPanel,
+            [entityPanel, this](int index) {
+              if (ui->tabWidget->widget(index) == ui->entityTab) {
+                entityPanel->refresh();
+              }
+            });
   }
 
   if (settings.archiveParsing()) {
@@ -2267,10 +2273,6 @@ void MainWindow::on_tabWidget_currentChanged(int index)
     m_DataTab->activated();
   } else if (currentWidget == ui->savesTab) {
     m_SavesTab->refreshSaveList();
-  } else if (currentWidget == ui->entityTab) {
-    if (auto* panel = ui->entityTab->findChild<EntityPanel*>()) {
-      panel->refresh();
-    }
   }
 }
 
