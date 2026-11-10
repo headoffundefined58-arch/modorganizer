@@ -161,6 +161,13 @@ bool EntityPanel::loadCatalog()
   return !m_groups.isEmpty();
 }
 
+EntityPanel::~EntityPanel()
+{
+  if (m_debounce != nullptr) {
+    m_debounce->stop();
+  }
+}
+
 void EntityPanel::scheduleRefresh()
 {
   if (m_available) {
@@ -170,7 +177,8 @@ void EntityPanel::scheduleRefresh()
 
 void EntityPanel::refresh()
 {
-  if (!m_available || m_core == nullptr) {
+  OrganizerCore* core = qobject_cast<OrganizerCore*>(m_core.data());
+  if (!m_available || core == nullptr) {
     return;
   }
 
@@ -178,7 +186,7 @@ void EntityPanel::refresh()
   // "-Name". Reading it keeps this panel independent of the model internals
   // and never touches the mod list itself.
   QStringList enabledMods;
-  if (const Profile* profile = m_core->currentProfile()) {
+  if (const Profile* profile = core->currentProfile()) {
     QFile modlist(profile->getModlistFileName());
     if (modlist.open(QIODevice::ReadOnly)) {
       while (!modlist.atEnd()) {
@@ -194,7 +202,7 @@ void EntityPanel::refresh()
     }
   }
 
-  const QString modsPath = m_core->settings().paths().mods();
+  const QString modsPath = core->settings().paths().mods();
   QVector<ModFiles> perMod;
   for (const QString& modName : enabledMods) {
     const QString modDir = modsPath + "/" + modName;

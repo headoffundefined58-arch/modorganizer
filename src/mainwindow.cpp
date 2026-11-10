@@ -129,6 +129,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QPainter>
 #include <QPixmap>
 #include <QPoint>
+#include <QPointer>
 #include <QProcess>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -514,9 +515,16 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   // instance without [VFSEntityPanel] drops the tab completely, so Bethesda
   // instances keep exactly the tab layout they had before.
   auto* entityPanel = new EntityPanel(&m_OrganizerCore, ui->entityTab);
-  ui->entityTab->layout()->addWidget(entityPanel);
+  if (QLayout* entityLayout = ui->entityTab->layout()) {
+    entityLayout->addWidget(entityPanel);
+  }
   if (!entityPanel->available()) {
-    ui->tabWidget->removeTab(ui->tabWidget->indexOf(ui->entityTab));
+    // Hide instead of remove: removing shifts every later tab index and the
+    // saved "current tab" index that is restored right after this.
+    const int hiddenIndex = ui->tabWidget->indexOf(ui->entityTab);
+    if (hiddenIndex >= 0) {
+      ui->tabWidget->setTabVisible(hiddenIndex, false);
+    }
   } else {
     connect(m_OrganizerCore.modList(), &ModList::modStatesChanged, entityPanel,
             [entityPanel](const QModelIndexList&) {
@@ -528,9 +536,11 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
             });
     connect(m_OrganizerCore.modList(), &QAbstractItemModel::modelReset, entityPanel,
             [entityPanel]() { entityPanel->scheduleRefresh(); });
+    QPointer<QTabWidget> liveTabs = ui->tabWidget;
+    QPointer<QWidget> liveTab    = ui->entityTab;
     connect(ui->tabWidget, &QTabWidget::currentChanged, entityPanel,
-            [entityPanel, this](int index) {
-              if (ui->tabWidget->widget(index) == ui->entityTab) {
+            [entityPanel, liveTabs, liveTab](int index) {
+              if (liveTabs && liveTab && liveTabs->widget(index) == liveTab) {
                 entityPanel->refresh();
               }
             });

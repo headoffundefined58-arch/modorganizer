@@ -27,6 +27,7 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -64,6 +65,7 @@ class EntityPanel : public QWidget
 {
 public:
   explicit EntityPanel(OrganizerCore* core, QWidget* parent = nullptr);
+  ~EntityPanel() override;
 
   // False when the instance has no [VFSEntityPanel] section or the catalog
   // could not be read; the caller removes the tab in that case.
@@ -77,7 +79,9 @@ private:
   void applyFilter(const QString& text);
   QString label(const QString& key, const QString& fallback) const;
 
-  OrganizerCore* m_core = nullptr;
+  // QPointer: an instance switch rebuilds OrganizerCore, which nulls this
+  // out instead of leaving a dangling pointer behind.
+  QPointer<QObject> m_core;
   QLineEdit* m_filter = nullptr;
   QPushButton* m_refreshButton = nullptr;
   QLabel* m_summary = nullptr;
