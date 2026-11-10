@@ -1,0 +1,234 @@
+diff --git a/src/organizercore.cpp b/src/organizercore.cpp
+--- a/src/organizercore.cpp
++++ b/src/organizercore.cpp
+@@ -29,6 +29,7 @@
+ #include "spawn.h"
+ #include "syncoverwritedialog.h"
+ #include "virtualfiletree.h"
++#include "vfscoreconfig.h"
+ #include <dataarchives.h>
+ #include <ipluginmodpage.h>
+ #include <localsavegames.h>
+@@ -42,6 +43,7 @@
+ #include <QApplication>
+ #include <QCoreApplication>
+ #include <QDialog>
++#include <QFileInfo>
+ #include <QDialogButtonBox>
+ #include <QMessageBox>
+ #include <QNetworkInterface>
+@@ -282,6 +284,13 @@
+   m_GameName   = game->gameName();
+   m_GamePlugin = game;
+   qApp->setProperty("managed_game", QVariant::fromValue(m_GamePlugin));
++
++  // MO2 core upgrade: load the instance VFS config here, on the main
++  // thread, so the directory refresher worker only reads an immutable
++  // cache. Instances without the config get an empty one.
++  vfsCoreCachedConfig(QDir(game->gameDirectory().absolutePath()),
++                      game->dataDirectory());
++
+   emit managedGameChanged(m_GamePlugin);
+ }
+ 
+@@ -2034,8 +2043,18 @@
+ 
+   MappingType result;
+ 
++  // ---- MO2 core upgrade: instance-scoped virtual destinations ----
++  const QDir gameRoot(game->gameDirectory().absolutePath());
++  const QDir dataDir(game->dataDirectory().absolutePath());
++  const VFSCoreConfig& vfsConfig = vfsCoreCachedConfig(gameRoot, dataDir);
++
+   QStringList dataPaths;
+-  dataPaths.append(QDir::toNativeSeparators(game->dataDirectory().absolutePath()));
++  if (vfsConfig.dataRootOverride.isEmpty()) {
++    dataPaths.append(
++        QDir::toNativeSeparators(game->dataDirectory().absolutePath()));
++  } else {
++    dataPaths.append(vfsConfig.dataRootOverride);
++  }
+ 
+   for (auto directory : game->secondaryDataDirectories()) {
+     dataPaths.append(directory.absolutePath());
+@@ -2059,6 +2078,24 @@
+       for (auto dataPath : dataPaths) {
+         result.insert(result.end(), {QDir::toNativeSeparators(std::get<1>(mod)),
+                                      dataPath, true, createTarget});
++      }
++
++      // MO2 core upgrade: extra destinations for this same mod, emitted
++      // in exactly the same priority order as the native mappings.
++      // A disabled mod never reaches this loop, so enable/disable,
++      // priority and overwrite semantics stay entirely native.
++      if (!vfsConfig.rules.isEmpty()) {
++        const QDir modDir(std::get<1>(mod));
++        for (const VFSCoreRule& rule : vfsConfig.rules) {
++          const QString source = modDir.filePath(rule.source);
++          const QFileInfo sourceInfo(source);
++          if (!sourceInfo.exists()) {
++            continue;
++          }
++          result.insert(result.end(),
++                        {QDir::toNativeSeparators(source), rule.destination,
++                         sourceInfo.isDir(), false});
++        }
+       }
+     }
+   }
+diff --git a/src/directoryrefresher.cpp b/src/directoryrefresher.cpp
+--- a/src/directoryrefresher.cpp
++++ b/src/directoryrefresher.cpp
+@@ -31,6 +31,7 @@
+ #include "settings.h"
+ #include "shared/util.h"
+ #include "utility.h"
++#include "vfscoreconfig.h"
+ 
+ #include <gameplugins.h>
+ 
+@@ -465,8 +466,18 @@
+ 
+     IPluginGame* game = qApp->property("managed_game").value<IPluginGame*>();
+ 
++    // MO2 core upgrade: keep the virtual directory tree in sync with
++    // the instance's declared data root, so the Data tab (conflicts,
++    // overwrite flags) matches what the launched game actually sees.
++    const QDir gameRoot(game->gameDirectory().absolutePath());
++    const QDir dataDir(game->dataDirectory().absolutePath());
++    const VFSCoreConfig& vfsConfig = vfsCoreCachedConfig(gameRoot, dataDir);
++    const QString effectiveDataDir = vfsConfig.dataRootOverride.isEmpty()
++                                         ? dataDir.absolutePath()
++                                         : vfsConfig.dataRootOverride;
++
+     std::wstring dataDirectory =
+-        QDir::toNativeSeparators(game->dataDirectory().absolutePath()).toStdWString();
++        QDir::toNativeSeparators(effectiveDataDir).toStdWString();
+ 
+     {
+       DirectoryStats dummy;
+diff --git a/src/vfscoreconfig.h b/src/vfscoreconfig.h
+new file mode 100644
+--- /dev/null
++++ b/src/vfscoreconfig.h
+@@ -0,0 +1,120 @@
++#pragma once
++
++/*
++ * MO2 core upgrade - instance-scoped, spec-driven VFS destinations.
++ *
++ * This file is part of ModOrganizer.exe itself, NOT a plugin. It lets a single
++ * MO2 *instance* declare additional virtual destinations for mod files, so
++ * games whose mods do not live in one "Data" folder can still be managed with
++ * MO2's native enable/disable, priority, conflict and overwrite machinery.
++ *
++ * Configuration lives in the current instance's ModOrganizer.ini:
++ *
++ *   [VFSCore]
++ *   data_root_override=${GAME_ROOT}          ; optional, replaces dataDirectory()
++ *
++ *   [VFSRootMappings]
++ *   size=2
++ *   1\source=Root
++ *   1\destination=${GAME_ROOT}
++ *   2\source=bin
++ *   2\destination=${GAME_ROOT}/bin/x64
++ *
++ * Placeholders: ${GAME_ROOT} = game->gameDirectory(), ${DATA_DIR} =
++ * game->dataDirectory(). A relative destination is resolved against the game
++ * root. A "source" is always relative to a mod folder and must never escape
++ * it. Instances without these sections produce an empty config, in which case
++ * fileMapping() and DirectoryRefresher::refresh() behave byte-for-byte like
++ * an unpatched MO2 (zero impact on Skyrim and other Bethesda instances).
++ */
++
++#include "instancemanager.h"
++
++#include <QDir>
++#include <QSettings>
++#include <QString>
++#include <QVector>
++
++#include <mutex>
++
++struct VFSCoreRule
++{
++  QString source;       // relative to each mod folder, never absolute
++  QString destination;  // absolute path after placeholder expansion
++};
++
++struct VFSCoreConfig
++{
++  QString dataRootOverride;  // empty -> keep the game plugin's dataDirectory()
++  QVector<VFSCoreRule> rules;
++
++  bool isEmpty() const
++  {
++    return dataRootOverride.isEmpty() && rules.isEmpty();
++  }
++};
++
++inline QString vfsCoreExpandPath(const QString& raw, const QDir& gameRoot,
++                                 const QDir& dataDir)
++{
++  QString path = raw.trimmed();
++  path.replace("${GAME_ROOT}", gameRoot.absolutePath());
++  path.replace("${DATA_DIR}", dataDir.absolutePath());
++  if (!QDir::isAbsolutePath(path)) {
++    path = gameRoot.filePath(path);
++  }
++  return QDir::toNativeSeparators(QDir::cleanPath(path));
++}
++
++inline VFSCoreConfig vfsCoreLoadConfig(const QDir& gameRoot, const QDir& dataDir)
++{
++  VFSCoreConfig config;
++
++  const auto instance = InstanceManager::singleton().currentInstance();
++  if (!instance) {
++    return config;
++  }
++
++  QSettings ini(instance->iniPath(), QSettings::IniFormat);
++  if (ini.status() != QSettings::NoError) {
++    return config;
++  }
++
++  const QString override =
++      ini.value("VFSCore/data_root_override").toString().trimmed();
++  if (!override.isEmpty()) {
++    config.dataRootOverride = vfsCoreExpandPath(override, gameRoot, dataDir);
++  }
++
++  const int count = ini.beginReadArray("VFSRootMappings");
++  for (int i = 0; i < count; ++i) {
++    ini.setArrayIndex(i);
++    const QString source      = ini.value("source").toString().trimmed();
++    const QString destination = ini.value("destination").toString().trimmed();
++    if (source.isEmpty() || destination.isEmpty()) {
++      continue;
++    }
++    // A rule must never point outside its own mod folder.
++    if (QDir::isAbsolutePath(source) || source.contains("..")) {
++      continue;
++    }
++    VFSCoreRule rule;
++    rule.source      = QDir::fromNativeSeparators(source);
++    rule.destination = vfsCoreExpandPath(destination, gameRoot, dataDir);
++    config.rules.push_back(rule);
++  }
++  ini.endArray();
++
++  return config;
++}
++
++// Read once on the main thread (warmed up by OrganizerCore::setManagedGame),
++// then shared read-only with the directory refresher worker thread.
++inline const VFSCoreConfig& vfsCoreCachedConfig(const QDir& gameRoot,
++                                                const QDir& dataDir)
++{
++  static std::once_flag once;
++  static VFSCoreConfig config;
++  std::call_once(once, [&]() { config = vfsCoreLoadConfig(gameRoot, dataDir); });
++  return config;
++}

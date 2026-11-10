@@ -1,0 +1,584 @@
+diff --git a/src/vfscoreconfig.h b/src/vfscoreconfig.h
+--- a/src/vfscoreconfig.h
++++ b/src/vfscoreconfig.h
+@@ -108,13 +108,41 @@
+   return config;
+ }
+ 
+-// Read once on the main thread (warmed up by OrganizerCore::setManagedGame),
+-// then shared read-only with the directory refresher worker thread.
+-inline const VFSCoreConfig& vfsCoreCachedConfig(const QDir& gameRoot,
+-                                                const QDir& dataDir)
++// Read on the main thread (warmed up by OrganizerCore::setManagedGame),
++// then shared read-only with the directory refresher worker thread. The
++// settings dialog invalidates the cache after editing the game profile.
++namespace vfsCoreCacheDetail
+ {
+-  static std::once_flag once;
+-  static VFSCoreConfig config;
+-  std::call_once(once, [&]() { config = vfsCoreLoadConfig(gameRoot, dataDir); });
+-  return config;
++inline std::mutex& mutex()
++{
++  static std::mutex m;
++  return m;
+ }
++inline VFSCoreConfig& config()
++{
++  static VFSCoreConfig c;
++  return c;
++}
++inline bool& loaded()
++{
++  static bool b = false;
++  return b;
++}
++}  // namespace vfsCoreCacheDetail
++
++inline VFSCoreConfig vfsCoreCachedConfig(const QDir& gameRoot,
++                                         const QDir& dataDir)
++{
++  std::lock_guard<std::mutex> lock(vfsCoreCacheDetail::mutex());
++  if (!vfsCoreCacheDetail::loaded()) {
++    vfsCoreCacheDetail::config() = vfsCoreLoadConfig(gameRoot, dataDir);
++    vfsCoreCacheDetail::loaded() = true;
++  }
++  return vfsCoreCacheDetail::config();
++}
++
++inline void vfsCoreInvalidateCache()
++{
++  std::lock_guard<std::mutex> lock(vfsCoreCacheDetail::mutex());
++  vfsCoreCacheDetail::loaded() = false;
++}
+diff --git a/src/organizercore.cpp b/src/organizercore.cpp
+--- a/src/organizercore.cpp
++++ b/src/organizercore.cpp
+@@ -29,6 +29,7 @@
+ #include "spawn.h"
+ #include "syncoverwritedialog.h"
+ #include "virtualfiletree.h"
++#include "gameprofileconfig.h"
+ #include "vfscoreconfig.h"
+ #include <dataarchives.h>
+ #include <ipluginmodpage.h>
+@@ -289,6 +290,8 @@
+   // thread, so the directory refresher worker only reads an immutable
+   // cache. Instances without the config get an empty one.
+   vfsCoreCachedConfig(QDir(game->gameDirectory().absolutePath()),
++                      game->dataDirectory());
++  gameProfileSnapshot(QDir(game->gameDirectory().absolutePath()),
+                       game->dataDirectory());
+ 
+   emit managedGameChanged(m_GamePlugin);
+@@ -2047,6 +2050,7 @@
+   const QDir gameRoot(game->gameDirectory().absolutePath());
+   const QDir dataDir(game->dataDirectory().absolutePath());
+   const VFSCoreConfig& vfsConfig = vfsCoreCachedConfig(gameRoot, dataDir);
++  const GameProfileConfig gameProfile = gameProfileSnapshot(gameRoot, dataDir);
+ 
+   QStringList dataPaths;
+   if (vfsConfig.dataRootOverride.isEmpty()) {
+@@ -2075,9 +2079,27 @@
+     overwriteActive |= createTarget;
+ 
+     if (modPtr->isRegular()) {
+-      for (auto dataPath : dataPaths) {
+-        result.insert(result.end(), {QDir::toNativeSeparators(std::get<1>(mod)),
+-                                     dataPath, true, createTarget});
++      const QString modPath = std::get<1>(mod);
++
++      // MO2 core upgrade: a bare mod (loose game assets, no layout
++      // directory) goes into the game-specific destination declared
++      // by this instance. Structured mods keep the native mapping.
++      // This stays inside the native priority loop, so enable,
++      // priority, conflict and overwrite semantics remain MO2's own.
++      // createTarget mirrors the native value: only a mod explicitly
++      // designated as custom overwrite may be a write target. The
++      // overwrite mapping below carries the CREATETARGET flag that
++      // materializes a virtual destination the game does not have.
++      if (gameProfileIsBareMod(modPath, gameProfile)) {
++        result.insert(result.end(),
++                      {QDir::toNativeSeparators(modPath),
++                       gameProfile.bareDestination, true, createTarget});
++      } else {
++        for (auto dataPath : dataPaths) {
++          result.insert(result.end(),
++                        {QDir::toNativeSeparators(modPath), dataPath, true,
++                         createTarget});
++        }
+       }
+ 
+       // MO2 core upgrade: extra destinations for this same mod, emitted
+@@ -2113,7 +2135,20 @@
+       result.reserve(result.size() + saveMap.size());
+       result.insert(result.end(), saveMap.begin(), saveMap.end());
+     } else {
+-      log::warn("local save games not supported by this game plugin");
++      // MO2 core upgrade: games without a LocalSavegames plugin
++      // feature can still have per-profile saves, declared by this
++      // instance's game profile. The real save directory is never
++      // written to; USVFS shows the profile's saves/ there instead.
++      if (gameProfile.savePerProfile && !gameProfile.saveSource.isEmpty()) {
++        const QString profileSaves = currentProfile()->savePath();
++        gameProfileSeedSaves(profileSaves, gameProfile);
++        result.insert(result.end(),
++                      {QDir::toNativeSeparators(profileSaves),
++                       QDir::toNativeSeparators(gameProfile.saveSource),
++                       true, true});
++      } else {
++        log::warn("local save games not supported by this game plugin");
++      }
+     }
+   }
+ 
+@@ -2121,6 +2156,16 @@
+     result.insert(result.end(),
+                   {QDir::toNativeSeparators(m_Settings.paths().overwrite()), dataPath,
+                    true, customOverwrite.isEmpty()});
++  }
++
++  // MO2 core upgrade: the bare-mod destination also receives the
++  // overwrite folder as its highest-priority source, so game writes
++  // land in overwrite/ and never in a mod folder.
++  if (!gameProfile.bareDestination.isEmpty()) {
++    result.insert(result.end(),
++                  {QDir::toNativeSeparators(m_Settings.paths().overwrite()),
++                   gameProfile.bareDestination, true,
++                   customOverwrite.isEmpty()});
+   }
+ 
+   for (MOBase::IPluginFileMapper* mapper :
+diff --git a/src/savestab.cpp b/src/savestab.cpp
+--- a/src/savestab.cpp
++++ b/src/savestab.cpp
+@@ -2,6 +2,7 @@
+ #include "activatemodsdialog.h"
+ #include "organizercore.h"
+ #include "ui_mainwindow.h"
++#include "gameprofileconfig.h"
+ #include <iplugingame.h>
+ #include <isavegameinfowidget.h>
+ 
+@@ -128,6 +129,23 @@
+ 
+ QDir SavesTab::currentSavesDir() const
+ {
++  // MO2 core upgrade: the instance game profile knows where this
++  // game's saves really live (Steam/RUNE userdata, LocalLow, ...),
++  // instead of assuming Documents/My Games. Instances without a
++  // profile keep the original behaviour.
++  auto* game = m_core.managedGame();
++  const GameProfileConfig gp =
++      game ? gameProfileSnapshot(
++                 QDir(game->gameDirectory().absolutePath()),
++                 game->dataDirectory())
++            : GameProfileConfig();
++  if (!gp.saveSource.isEmpty()) {
++    if (gp.savePerProfile && m_core.currentProfile()->localSavesEnabled()) {
++      return QDir(m_core.currentProfile()->savePath());
++    }
++    return QDir(gp.saveSource);
++  }
++
+   QDir savesDir;
+   if (m_core.currentProfile()->localSavesEnabled()) {
+     savesDir.setPath(m_core.currentProfile()->savePath());
+diff --git a/src/settingsdialog.ui b/src/settingsdialog.ui
+--- a/src/settingsdialog.ui
++++ b/src/settingsdialog.ui
+@@ -1004,6 +1004,82 @@
+           </widget>
+          </item>
+         </layout>
++       </item>
++       <item>
++        <widget class="QGroupBox" name="gameProfileGroup">
++         <property name="title">
++          <string>Game Profile (instance-specific)</string>
++         </property>
++         <layout class="QFormLayout" name="gameProfileForm">
++          <item row="0" column="0">
++           <widget class="QLabel" name="gpDataRootLabel">
++            <property name="text">
++             <string>Virtual data root</string>
++            </property>
++           </widget>
++          </item>
++          <item row="0" column="1">
++           <widget class="QLineEdit" name="gpDataRootEdit"/>
++          </item>
++          <item row="1" column="0">
++           <widget class="QLabel" name="gpBareDestLabel">
++            <property name="text">
++             <string>Bare mod destination</string>
++            </property>
++           </widget>
++          </item>
++          <item row="1" column="1">
++           <widget class="QLineEdit" name="gpBareDestEdit"/>
++          </item>
++          <item row="2" column="0">
++           <widget class="QLabel" name="gpBarePatternsLabel">
++            <property name="text">
++             <string>Bare file patterns</string>
++            </property>
++           </widget>
++          </item>
++          <item row="2" column="1">
++           <widget class="QLineEdit" name="gpBarePatternsEdit"/>
++          </item>
++          <item row="3" column="0">
++           <widget class="QLabel" name="gpSaveDirLabel">
++            <property name="text">
++             <string>Save directory</string>
++            </property>
++           </widget>
++          </item>
++          <item row="3" column="1">
++           <widget class="QLineEdit" name="gpSaveDirEdit"/>
++          </item>
++          <item row="4" column="0">
++           <widget class="QLabel" name="gpSavePatternLabel">
++            <property name="text">
++             <string>Save file pattern</string>
++            </property>
++           </widget>
++          </item>
++          <item row="4" column="1">
++           <widget class="QLineEdit" name="gpSavePatternEdit"/>
++          </item>
++          <item row="5" column="1">
++           <widget class="QCheckBox" name="gpSavePerProfileBox">
++            <property name="text">
++             <string>Isolate saves per profile</string>
++            </property>
++           </widget>
++          </item>
++          <item row="6" column="1">
++           <widget class="QLabel" name="gpHelpLabel">
++            <property name="text">
++             <string>Placeholders: ${GAME_ROOT} ${DATA_DIR} ${PUBLIC_DOCUMENTS} ${LOCALAPPDATA} ${USERPROFILE}. Leave empty to use the game plugin's defaults (no effect on Bethesda instances).</string>
++            </property>
++            <property name="wordWrap">
++             <bool>true</bool>
++            </property>
++           </widget>
++          </item>
++         </layout>
++        </widget>
+        </item>
+        <item>
+         <spacer name="verticalSpacer_6">
+diff --git a/src/settingsdialogpaths.cpp b/src/settingsdialogpaths.cpp
+--- a/src/settingsdialogpaths.cpp
++++ b/src/settingsdialogpaths.cpp
+@@ -1,7 +1,9 @@
+ #include "settingsdialogpaths.h"
++#include "gameprofileconfig.h"
+ #include "shared/appconfig.h"
+ #include "ui_settingsdialog.h"
+ #include <iplugingame.h>
++#include <QSettings>
+ 
+ PathsSettingsTab::PathsSettingsTab(Settings& s, SettingsDialog& d)
+     : SettingsTab(s, d), m_gameDir(settings().game().plugin()->gameDirectory())
+@@ -66,6 +68,25 @@
+   QObject::connect(ui->profilesDirEdit, &QLineEdit::editingFinished, [&] {
+     on_profilesDirEdit_editingFinished();
+   });
++
++  // MO2 core upgrade: game-specific fields hold the raw (unexpanded) values
++  // from the current instance's ini; the core expands the placeholders.
++  const QString gpIni = gameProfileIniPath();
++  if (!gpIni.isEmpty()) {
++    QSettings gp(gpIni, QSettings::IniFormat);
++    ui->gpDataRootEdit->setText(
++        gp.value("VFSCore/data_root_override").toString());
++    ui->gpBareDestEdit->setText(
++        gp.value("VFSContentLayout/bare_destination").toString());
++    ui->gpBarePatternsEdit->setText(
++        gp.value("VFSContentLayout/bare_patterns", "*.xfbin").toString());
++    ui->gpSaveDirEdit->setText(
++        gp.value("VFSGameProfile/save_source").toString());
++    ui->gpSavePatternEdit->setText(
++        gp.value("VFSGameProfile/save_pattern", "*").toString());
++    ui->gpSavePerProfileBox->setChecked(
++        gp.value("VFSGameProfile/save_per_profile", false).toBool());
++  }
+ }
+ 
+ void PathsSettingsTab::update()
+@@ -124,6 +145,28 @@
+   if (m_gameDir != settings().game().plugin()->gameDirectory()) {
+     settings().game().setDirectory(m_gameDir.absolutePath());
+   }
++
++  // MO2 core upgrade: persist the instance game profile and force both
++  // config caches to re-read on the next VFS build.
++  const QString gpIni = gameProfileIniPath();
++  if (!gpIni.isEmpty()) {
++    QSettings gp(gpIni, QSettings::IniFormat);
++    gp.setValue("VFSCore/data_root_override",
++                ui->gpDataRootEdit->text().trimmed());
++    gp.setValue("VFSContentLayout/bare_destination",
++                ui->gpBareDestEdit->text().trimmed());
++    gp.setValue("VFSContentLayout/bare_patterns",
++                ui->gpBarePatternsEdit->text().trimmed());
++    gp.setValue("VFSGameProfile/save_source",
++                ui->gpSaveDirEdit->text().trimmed());
++    gp.setValue("VFSGameProfile/save_pattern",
++                ui->gpSavePatternEdit->text().trimmed());
++    gp.setValue("VFSGameProfile/save_per_profile",
++                ui->gpSavePerProfileBox->isChecked());
++    gp.sync();
++    vfsCoreInvalidateCache();
++    gameProfileInvalidateCache();
++  }
+ }
+ 
+ void PathsSettingsTab::on_browseBaseDirBtn_clicked()
+diff --git a/src/gameprofileconfig.h b/src/gameprofileconfig.h
+new file mode 100644
+--- /dev/null
++++ b/src/gameprofileconfig.h
+@@ -0,0 +1,239 @@
++#pragma once
++
++/*
++ * MO2 core upgrade - instance-scoped game profile.
++ *
++ * This file is part of ModOrganizer.exe itself, NOT a plugin.
++ *
++ * Bethesda games all look the same to MO2: one Data folder, saves under
++ * Documents/My Games, loose files dropped into Data. Other games do not.
++ * This header lets each *instance* declare the parts of a game that differ:
++ *
++ *   [VFSContentLayout]  where unstructured ("bare") mod files belong
++ *   [VFSGameProfile]    where the game's saves live and how they are isolated
++ *
++ * Example for NARUTO X BORUTO Ultimate Ninja STORM CONNECTIONS (RUNE build):
++ *
++ *   [VFSContentLayout]
++ *   bare_destination=${GAME_ROOT}/data_win32/spc
++ *   bare_patterns=*.xfbin;*.dds;*.tex.xfbin
++ *   layout_markers=data_win32;data;moddingapi;Root;engine
++ *
++ *   [VFSGameProfile]
++ *   save_source=${PUBLIC_DOCUMENTS}/Steam/RUNE/1020790/remote
++ *   save_pattern=stormc.s
++ *   save_per_profile=true
++ *   seed_existing_saves=true
++ *
++ * Placeholders: ${GAME_ROOT}, ${DATA_DIR}, ${PUBLIC_DOCUMENTS},
++ * ${DOCUMENTS}, ${APPDATA}, ${LOCALAPPDATA}, ${USERPROFILE}. A relative
++ * path is resolved against the game root. Instances without these sections
++ * get an empty config, in which case fileMapping(), the Data tab and the
++ * Saves tab behave exactly like an unpatched MO2 (zero impact on Skyrim).
++ */
++
++#include "instancemanager.h"
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QSettings>
++#include <QString>
++#include <QStringList>
++#include <QtGlobal>
++
++#include <mutex>
++
++struct GameProfileConfig
++{
++  QString bareDestination;   // absolute; empty disables bare-mod normalization
++  QStringList barePatterns;  // file names that make a mod "bare"
++  QStringList layoutMarkers; // directories that mean "already laid out"
++  QString saveSource;        // absolute; the game's real save directory
++  QString savePattern;       // e.g. "stormc.s", "*.sav"
++  bool savePerProfile = false;
++  bool seedSaves      = false;
++
++  bool isEmpty() const
++  {
++    return bareDestination.isEmpty() && saveSource.isEmpty();
++  }
++};
++
++inline QStringList gpSplitList(const QString& raw)
++{
++  QStringList result;
++  for (const QString& part : raw.split(';')) {
++    const QString value = part.trimmed();
++    if (!value.isEmpty()) {
++      result.append(value);
++    }
++  }
++  return result;
++}
++
++inline QString gpEnv(const char* name)
++{
++  return QString::fromLocal8Bit(qgetenv(name));
++}
++
++inline QString gpExpandPath(const QString& raw, const QDir& gameRoot,
++                            const QDir& dataDir)
++{
++  QString path = raw.trimmed();
++  path.replace("${GAME_ROOT}", gameRoot.absolutePath());
++  path.replace("${DATA_DIR}", dataDir.absolutePath());
++  path.replace("${PUBLIC_DOCUMENTS}", gpEnv("PUBLIC") + "/Documents");
++  path.replace("${USERPROFILE}", gpEnv("USERPROFILE"));
++  path.replace("${LOCALAPPDATA}", gpEnv("LOCALAPPDATA"));
++  path.replace("${APPDATA}", gpEnv("APPDATA"));
++  path.replace("${DOCUMENTS}",
++               gpEnv("USERPROFILE") + "/Documents");
++  if (!QDir::isAbsolutePath(path)) {
++    path = gameRoot.filePath(path);
++  }
++  return QDir::toNativeSeparators(QDir::cleanPath(path));
++}
++
++inline QString gameProfileIniPath()
++{
++  const auto instance = InstanceManager::singleton().currentInstance();
++  return instance ? instance->iniPath() : QString();
++}
++
++inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
++                                               const QDir& dataDir)
++{
++  GameProfileConfig config;
++
++  const QString iniPath = gameProfileIniPath();
++  if (iniPath.isEmpty()) {
++    return config;
++  }
++
++  QSettings ini(iniPath, QSettings::IniFormat);
++  if (ini.status() != QSettings::NoError) {
++    return config;
++  }
++
++  const QString bare =
++      ini.value("VFSContentLayout/bare_destination").toString().trimmed();
++  if (!bare.isEmpty()) {
++    config.bareDestination = gpExpandPath(bare, gameRoot, dataDir);
++  }
++  config.barePatterns = gpSplitList(
++      ini.value("VFSContentLayout/bare_patterns", "*.xfbin").toString());
++  config.layoutMarkers = gpSplitList(
++      ini.value("VFSContentLayout/layout_markers",
++                "data_win32;data;moddingapi;Root;engine")
++          .toString());
++
++  const QString save =
++      ini.value("VFSGameProfile/save_source").toString().trimmed();
++  if (!save.isEmpty()) {
++    config.saveSource = gpExpandPath(save, gameRoot, dataDir);
++  }
++  config.savePattern =
++      ini.value("VFSGameProfile/save_pattern", "*").toString().trimmed();
++  config.savePerProfile =
++      ini.value("VFSGameProfile/save_per_profile", false).toBool();
++  config.seedSaves =
++      ini.value("VFSGameProfile/seed_existing_saves", false).toBool();
++
++  return config;
++}
++
++namespace gpCacheDetail
++{
++inline std::mutex& mutex()
++{
++  static std::mutex m;
++  return m;
++}
++inline GameProfileConfig& config()
++{
++  static GameProfileConfig c;
++  return c;
++}
++inline bool& loaded()
++{
++  static bool b = false;
++  return b;
++}
++}  // namespace gpCacheDetail
++
++// A snapshot is returned by value so worker threads never hold a reference
++// into the cache while the settings dialog refreshes it.
++inline GameProfileConfig gameProfileSnapshot(const QDir& gameRoot,
++                                             const QDir& dataDir)
++{
++  std::lock_guard<std::mutex> lock(gpCacheDetail::mutex());
++  if (!gpCacheDetail::loaded()) {
++    gpCacheDetail::config() = gameProfileLoadConfig(gameRoot, dataDir);
++    gpCacheDetail::loaded() = true;
++  }
++  return gpCacheDetail::config();
++}
++
++inline void gameProfileInvalidateCache()
++{
++  std::lock_guard<std::mutex> lock(gpCacheDetail::mutex());
++  gpCacheDetail::loaded() = false;
++}
++
++// True when a mod contains loose game assets but no game-layout directory.
++// Such a mod is what a user gets when a community package is unzipped
++// straight into mods/<name>/ (e.g. a bare 3ksnbod1.xfbin).
++inline bool gameProfileIsBareMod(const QString& modPath,
++                                 const GameProfileConfig& config)
++{
++  if (config.bareDestination.isEmpty() || config.barePatterns.isEmpty()) {
++    return false;
++  }
++  const QDir dir(modPath);
++  if (!dir.exists()) {
++    return false;
++  }
++  for (const QString& marker : config.layoutMarkers) {
++    if (dir.exists(marker)) {
++      return false;
++    }
++  }
++  for (const QFileInfo& info : dir.entryInfoList(QDir::Files)) {
++    for (const QString& pattern : config.barePatterns) {
++      if (QDir::match(pattern, info.fileName())) {
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
++// Copy the game's existing saves into the current profile once, so enabling
++// per-profile saves never makes the player's progress "disappear". Only the
++// MO2 profile directory is written to; the game directory is never touched.
++inline void gameProfileSeedSaves(const QString& profileSaves,
++                                 const GameProfileConfig& config)
++{
++  QDir target(profileSaves);
++  if (!target.exists() && !QDir().mkpath(profileSaves)) {
++    return;
++  }
++  if (!config.seedSaves || config.saveSource.isEmpty() ||
++      !target.entryList(QDir::Files).isEmpty()) {
++    return;
++  }
++  const QDir source(config.saveSource);
++  if (!source.exists()) {
++    return;
++  }
++  const QStringList patterns = gpSplitList(config.savePattern);
++  for (const QFileInfo& info : source.entryInfoList(QDir::Files)) {
++    for (const QString& pattern : patterns) {
++      if (QDir::match(pattern, info.fileName())) {
++        QFile::copy(info.absoluteFilePath(), target.filePath(info.fileName()));
++        break;
++      }
++    }
++  }
++}

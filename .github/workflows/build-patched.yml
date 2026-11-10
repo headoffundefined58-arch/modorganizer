@@ -1,0 +1,69 @@
+# Build the patched MO2 core (v2.5.2 + 0001 + 0002) and publish the exe.
+#
+# build-with-mob-action checks out THIS repository (the fork) into
+# build/<repo-name> and compiles it, so the committed patches are what gets
+# built. The upstream action itself does NOT upload anything, hence the
+# explicit upload-artifact step below.
+
+name: Build MO2 core (VFS upgrade 0001 + 0002)
+
+on:
+  push:
+    branches: [patched-core]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  verify:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert both core patches are committed
+        shell: bash
+        run: |
+          set -e
+          for f in src/vfscoreconfig.h src/gameprofileconfig.h; do
+            test -f "$f" || { echo "missing $f - patch not applied"; exit 1; }
+          done
+          grep -q "vfsCoreCachedConfig" src/organizercore.cpp
+          grep -q "gameProfileIsBareMod" src/organizercore.cpp
+          grep -q "gameProfileSeedSaves" src/organizercore.cpp
+          grep -q "gameProfileGroup" src/settingsdialog.ui
+          grep -q "gameProfileSnapshot" src/savestab.cpp
+          echo "both core patches present"
+
+  build:
+    needs: verify
+    runs-on: windows-2022
+    steps:
+      - name: Build patched ModOrganizer 2
+        uses: ModOrganizer2/build-with-mob-action@master
+        with:
+          qt-modules: qtpositioning qtwebchannel qtwebengine qtwebsockets
+          mo2-third-parties: >-
+            7z zlib gtest libbsarch libloot openssl bzip2 python lz4 spdlog
+            boost boost-di sip pyqt pybind11 ss licenses explorerpp DirectXTex
+          mo2-dependencies: >-
+            usvfs cmake_common uibase githubpp bsatk esptk archive lootcli
+            game_gamebryo
+
+      - name: Collect the built executable
+        shell: bash
+        run: |
+          set -e
+          mkdir -p dist
+          find . -type f -name 'ModOrganizer.exe' -print
+          find . -type f -name 'ModOrganizer.exe' -exec cp {} dist/ModOrganizer.exe \;
+          test -f dist/ModOrganizer.exe || { echo "ModOrganizer.exe not found"; exit 1; }
+          ls -l dist/ModOrganizer.exe
+
+      - name: Upload patched executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-modorganizer-exe
+          path: dist/ModOrganizer.exe
+          if-no-files-found: error
+          retention-days: 14
