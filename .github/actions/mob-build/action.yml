@@ -56,12 +56,22 @@ runs:
         repository: ModOrganizer2/mob
         ref: ${{ inputs.mob-ref }}
         path: ./mob
+    - name: Patch dead 7-Zip source URL
+      shell: pwsh
+      run: |
+        $p = "${{ github.workspace }}\mob\src\tasks\sevenz.cpp"
+        $t = Get-Content $p -Raw
+        $old = 'return "https://www.7-zip.org/a/7z" + version_for_url() + "-src.7z";'
+        $new = 'return "https://github.com/ip7z/7zip/releases/download/" + sevenz::version() + "/7z" + version_for_url() + "-src.7z";'
+        if (-not $t.Contains($old)) { throw "unexpected sevenz.cpp content; cannot patch" }
+        Set-Content -Path $p -Value $t.Replace($old, $new) -NoNewline
+        Write-Output "7z source now resolved from the official GitHub mirror"
     - name: Cache mob
       id: cache-mob
       uses: actions/cache@v4
       with:
         path: ./mob/mob.exe
-        key: ${{ runner.OS }}-mob-${{ inputs.mob-ref }}
+        key: ${{ runner.OS }}-mob-${{ inputs.mob-ref }}-r2
     - if: steps.cache-mob.outputs.cache-hit != 'true'
       name: Build mob
       shell: pwsh
@@ -101,7 +111,7 @@ runs:
         path: |
           ./build
           !./build/modorganizer_super
-        key: ${{ runner.OS }}-mo2-252-deps-${{ inputs.mob-ref }}
+        key: ${{ runner.OS }}-mo2-252-deps-${{ inputs.mob-ref }}-r2
     - if: steps.cache-dependencies.outputs.cache-hit != 'true'
       uses: actions/setup-python@v5
       with:
