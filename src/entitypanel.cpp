@@ -126,7 +126,24 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   m_tree->setColumnCount(m_columns.size());
   m_tree->setHeaderLabels(m_columns);
   if (QHeaderView* header = m_tree->header()) {
-    header->setSectionResizeMode(0, QHeaderView::Stretch);
+    // QHeaderView::Stretch makes a section impossible for the user to drag.
+    // With column 0 stretched, only the last column had a draggable edge,
+    // and long official Traditional Chinese names were cut off.  Make every
+    // column interactive and give them sensible starting widths.
+    for (int i = 0; i < m_columns.size(); ++i) {
+      header->setSectionResizeMode(i, QHeaderView::Interactive);
+    }
+    header->setMinimumSectionSize(60);
+    if (m_columns.size() > 0) {
+      header->resizeSection(0, 280);  // name
+    }
+    if (m_columns.size() > 1) {
+      header->resizeSection(1, 110);  // status
+    }
+    if (m_columns.size() > 2) {
+      header->resizeSection(2, 180);  // resource code
+    }
+    header->setSectionsMovable(true);
     header->setSortIndicator(0, Qt::AscendingOrder);
   }
   refresh();

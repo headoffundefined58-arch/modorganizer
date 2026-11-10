@@ -1,6 +1,7 @@
 #include "createinstancedialog.h"
 #include "createinstancedialogpages.h"
 #include "instancemanager.h"
+#include "nxbinstancedefaults.h"
 #include "settings.h"
 #include "shared/appconfig.h"
 #include "shared/util.h"
@@ -357,7 +358,11 @@ void CreateInstanceDialog::finish()
     }
 
     s.setProfileLocalInis(ci.profileSettings.localInis);
-    s.setProfileLocalSaves(ci.profileSettings.localSaves);
+    // MO2 core upgrade: root-data games need per-profile saves on, otherwise
+    // LocalSavegames never maps <profile>/saves over the game's save folder.
+    const bool rootDataGame =
+        nxbIsRootDataGame(ci.game, QDir(ci.gameLocation));
+    s.setProfileLocalSaves(rootDataGame || ci.profileSettings.localSaves);
     s.setProfileArchiveInvalidation(ci.profileSettings.archiveInvalidation);
 
     logCreation(tr("Writing %1...").arg(ci.iniPath));
@@ -381,6 +386,14 @@ void CreateInstanceDialog::finish()
       }
 
       throw Failed();
+    }
+
+    // MO2 core upgrade: write the game-correct VFS/save/catalog sections
+    // into the brand new ini, so a first-time NXB instance works without
+    // anyone hand-editing ModOrganizer.ini.  No effect on Bethesda games.
+    if (nxbEnsureInstanceDefaults(ci.iniPath, ci.game,
+                                  QDir(ci.gameLocation))) {
+      logCreation(tr("Applied game-specific VFS and save settings."));
     }
 
     // committing all the directories so they don't get deleted
@@ -533,6 +546,14 @@ CreateInstanceDialog::CreationInfo CreateInstanceDialog::creationInfo() const
   fixVarDir(ci.paths.mods, AppConfig::modsPath());
   fixVarDir(ci.paths.profiles, AppConfig::profilesPath());
   fixVarDir(ci.paths.overwrite, AppConfig::overwritePath());
+
+  // MO2 core upgrade: for a root-data game the game folder IS the virtual
+  // Data root.  Letting the user put mods/ there makes USVFS map a child
+  // directory onto its own parent, so no usable link is ever built.  Keep
+  // the instance data in its own folder instead.  Bethesda games are
+  // completely unaffected.
+  ci.paths.base = nxbSafeBaseDirectory(ci.game, QDir(ci.gameLocation),
+                                       ci.paths.base, ci.dataPath);
 
   return ci;
 }

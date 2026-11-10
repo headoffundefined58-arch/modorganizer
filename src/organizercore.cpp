@@ -30,6 +30,7 @@
 #include "syncoverwritedialog.h"
 #include "virtualfiletree.h"
 #include "gameprofileconfig.h"
+#include "nxbinstancedefaults.h"
 #include "vfscoreconfig.h"
 #include <dataarchives.h>
 #include <ipluginmodpage.h>
@@ -286,13 +287,20 @@ void OrganizerCore::setManagedGame(MOBase::IPluginGame* game)
   m_GamePlugin = game;
   qApp->setProperty("managed_game", QVariant::fromValue(m_GamePlugin));
 
+  // MO2 core upgrade: a root-data game (NARUTO X BORUTO) self-heals its
+  // instance configuration on every start.  A stock instance wizard writes
+  // none of these sections, and QSettings may have rewritten the ini with
+  // blanks; refilling missing keys here makes it impossible to end up with
+  // mods that MO2 refuses to map and saves that never land in the profile.
+  // Bethesda instances are not matched and are never touched.
+  const QDir gameRoot(game->gameDirectory().absolutePath());
+  nxbEnsureInstanceDefaults(gameProfileIniPath(), game, gameRoot);
+
   // MO2 core upgrade: load the instance VFS config here, on the main
   // thread, so the directory refresher worker only reads an immutable
   // cache. Instances without the config get an empty one.
-  vfsCoreCachedConfig(QDir(game->gameDirectory().absolutePath()),
-                      game->dataDirectory());
-  gameProfileSnapshot(QDir(game->gameDirectory().absolutePath()),
-                      game->dataDirectory());
+  vfsCoreCachedConfig(gameRoot, game->dataDirectory());
+  gameProfileSnapshot(gameRoot, game->dataDirectory());
 
   emit managedGameChanged(m_GamePlugin);
 }
