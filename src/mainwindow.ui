@@ -1077,7 +1077,7 @@
            </widget>
            <widget class="QWidget" name="entityTab">
             <attribute name="title">
-             <string>內容</string>
+             <string>内容</string>
             </attribute>
             <layout class="QVBoxLayout" name="entityTabLayout">
              <property name="spacing">

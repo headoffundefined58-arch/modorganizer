@@ -114,10 +114,14 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
     return;
   }
 
-  m_filter->setPlaceholderText(label("filter", "Filter..."));
-  m_refreshButton->setText(label("refresh", "Refresh"));
+  // Fallbacks are ASCII-only UTF-8 byte escapes: MSVC has no /utf-8 flag,
+  // so a raw CJK literal would depend on the runner code page. The JSON
+  // catalog normally supplies these Simplified Chinese strings anyway.
+  m_filter->setPlaceholderText(label("filter", QString::fromUtf8("\xE7\xAD\x9B\xE9\x80\x89\xE5\xBF\x8D\xE8\x80\x85\xE6\x88\x96\xE8\x88\x9E\xE5\x8F\xB0\xE2\x80\xA6")));
+  m_refreshButton->setText(label("refresh", QString::fromUtf8("\xE5\x88\xB7\xE6\x96\xB0")));
   if (m_columns.isEmpty()) {
-    m_columns = QStringList{"Name", "Status", "Code"};
+    m_columns = QStringList{QString::fromUtf8("\xE5\x90\x8D\xE7\xA7\xB0"), QString::fromUtf8("\xE7\x8A\xB6\xE6\x80\x81"),
+                        QString::fromUtf8("\xE8\xB5\x84\xE6\xBA\x90\xE4\xBB\xA3\xE7\xA0\x81")};
   }
   m_tree->setColumnCount(m_columns.size());
   m_tree->setHeaderLabels(m_columns);
@@ -327,19 +331,19 @@ void EntityPanel::refresh()
 
       const QVector<EntityModHit> contributions = hits.value(entity.id);
       if (contributions.isEmpty()) {
-        item->setText(1, label("original", "Original"));
+        item->setText(1, label("original", QString::fromUtf8("\xE5\x8E\x9F\xE7\x89\x88")));
         item->setData(1, kRoleRank, kRankOriginal);
         continue;
       }
 
       ++groupModified;
       if (contributions.size() == 1) {
-        item->setText(1, label("modified", "Modified"));
+        item->setText(1, label("modified", QString::fromUtf8("\xE5\xB7\xB2\xE4\xBF\xAE\xE6\x94\xB9")));
         item->setData(1, kRoleRank, kRankModified);
         item->setForeground(1, QBrush(QColor(255, 183, 77)));
       } else {
         item->setText(1, QString("%1 (%2)")
-                             .arg(label("multi", "Multiple mods"))
+                             .arg(label("multi", QString::fromUtf8("\xE5\xA4\x9A\xE4\xB8\xAA\x20\x4D\x6F\x64")))
                              .arg(contributions.size()));
         item->setData(1, kRoleRank, kRankMulti);
         item->setForeground(1, QBrush(QColor(239, 83, 80)));
@@ -353,9 +357,9 @@ void EntityPanel::refresh()
       for (const EntityModHit& hit : contributions) {
         auto* child = new EntityItem(item);
         child->setText(0, hit.modName);
-        child->setText(1, label("fromMod", "From"));
+        child->setText(1, label("fromMod", QString::fromUtf8("\xE6\x9D\xA5\xE8\x87\xAA")));
         child->setText(2, QString("%1: %2")
-                              .arg(label("files", "Files"))
+                              .arg(label("files", QString::fromUtf8("\xE5\x8C\xB9\xE9\x85\x8D\xE6\x96\x87\xE4\xBB\xB6")))
                               .arg(hit.fileCount));
         child->setData(0, kRoleMod, hit.modName);
         child->setToolTip(2, hit.sampleFiles.join("\n"));
