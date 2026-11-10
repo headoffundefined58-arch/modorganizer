@@ -1075,7 +1075,29 @@
              </item>
             </layout>
            </widget>
-           <widget class="QWidget" name="dataTab">
+           <widget class="QWidget" name="entityTab">
+            <attribute name="title">
+             <string>內容</string>
+            </attribute>
+            <layout class="QVBoxLayout" name="entityTabLayout">
+             <property name="spacing">
+              <number>2</number>
+             </property>
+             <property name="leftMargin">
+              <number>6</number>
+             </property>
+             <property name="topMargin">
+              <number>6</number>
+             </property>
+             <property name="rightMargin">
+              <number>6</number>
+             </property>
+             <property name="bottomMargin">
+              <number>0</number>
+             </property>
+            </layout>
+           </widget>
+<widget class="QWidget" name="dataTab">
             <attribute name="title">
              <string>Data</string>
             </attribute>
@@ -1426,29 +1448,7 @@
              </item>
             </layout>
            </widget>
-           <widget class="QWidget" name="entityTab">
-            <attribute name="title">
-             <string>忍者与地点</string>
-            </attribute>
-            <layout class="QVBoxLayout" name="entityTabLayout">
-             <property name="spacing">
-              <number>2</number>
-             </property>
-             <property name="leftMargin">
-              <number>6</number>
-             </property>
-             <property name="topMargin">
-              <number>6</number>
-             </property>
-             <property name="rightMargin">
-              <number>6</number>
-             </property>
-             <property name="bottomMargin">
-              <number>0</number>
-             </property>
-            </layout>
-           </widget>
-          </widget>
+                     </widget>
          </item>
         </layout>
        </widget>
