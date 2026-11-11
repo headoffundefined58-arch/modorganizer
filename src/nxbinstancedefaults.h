@@ -24,6 +24,7 @@
  * tools/finalize_nxb_instance.py.
  */
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
 #include <QSettings>
@@ -125,6 +126,44 @@ inline bool nxbEnsureInstanceDefaults(const QString& iniPath,
 
 // A new instance must never put mods/ inside the game folder for a root-data
 // game.  Returns the corrected base directory (unchanged for other games).
+// Where an instance's heavy data (mods/, downloads/, profiles/, overwrite/)
+// should live. The wizard default is AppData, i.e. the system drive, which is
+// the one place a modded setup must avoid: thousands of small files there are
+// slow to enumerate and fill up the profile disk. Preference: the drive MO2
+// itself lives on, then the game's drive; an empty result means "keep the
+// caller's default" (only when both are on the system drive).
+inline QString nxbPreferredBaseDirectory(const QDir& gameRoot,
+                                         const QString& instanceName)
+{
+  const QString name =
+      instanceName.trimmed().isEmpty() ? QStringLiteral("instance")
+                                       : instanceName.trimmed();
+  const QString systemDrive =
+      qEnvironmentVariable("SystemDrive", "C:").toUpper();
+
+  auto usableDrive = [&](const QString& path) {
+    const QString native = QDir::toNativeSeparators(path);
+    if (native.size() < 2 || native.at(1) != QChar(':')) {
+      return false;
+    }
+    return native.left(2).toUpper() != systemDrive;
+  };
+
+  const QString appDir = QCoreApplication::applicationDirPath();
+  if (usableDrive(appDir)) {
+    return QDir::toNativeSeparators(
+        QDir(appDir).filePath("instances/" + name));
+  }
+
+  const QString gameDir = gameRoot.absolutePath();
+  if (usableDrive(gameDir)) {
+    return QDir::toNativeSeparators(
+        QDir(gameDir.left(2) + "/MO2-Instances").filePath(name));
+  }
+
+  return {};
+}
+
 inline QString nxbSafeBaseDirectory(MOBase::IPluginGame* game,
                                     const QDir& gameRoot,
                                     const QString& requestedBase,
