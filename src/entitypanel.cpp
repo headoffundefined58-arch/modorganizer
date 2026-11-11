@@ -150,6 +150,8 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
           [this](const QString& text) { applyFilter(text); });
   connect(m_tree, &QTreeWidget::itemSelectionChanged, this,
           [this]() { currentEntityChanged(); });
+  connect(m_tree, &QTreeWidget::itemExpanded, this,
+          [this](QTreeWidgetItem* item) { populateChildren(item); });
 
   m_available = loadCatalog();
   if (!m_available) {
@@ -162,8 +164,7 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   m_filter->setPlaceholderText(label("filter", QString::fromUtf8("\xE7\xAD\x9B\xE9\x80\x89\xE5\xBF\x8D\xE8\x80\x85\xE6\x88\x96\xE8\x88\x9E\xE5\x8F\xB0\xE2\x80\xA6")));
   m_refreshButton->setText(label("refresh", QString::fromUtf8("\xE5\x88\xB7\xE6\x96\xB0")));
   if (m_columns.isEmpty()) {
-    m_columns = QStringList{QString::fromUtf8("\xE5\x90\x8D\xE7\xA7\xB0"), QString::fromUtf8("\xE7\x8A\xB6\xE6\x80\x81"),
-                        QString::fromUtf8("\xE8\xB5\x84\xE6\xBA\x90\xE4\xBB\xA3\xE7\xA0\x81")};
+    m_columns = QStringList{QString(), QString::fromUtf8("\xE7\x8A\xB6\xE6\x80\x81")};
   }
   m_tree->setColumnCount(m_columns.size());
   m_tree->setHeaderLabels(m_columns);
@@ -177,13 +178,10 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
     }
     header->setMinimumSectionSize(60);
     if (m_columns.size() > 0) {
-      header->resizeSection(0, 280);  // name
+      header->resizeSection(0, 300);  // entity name
     }
     if (m_columns.size() > 1) {
-      header->resizeSection(1, 110);  // status
-    }
-    if (m_columns.size() > 2) {
-      header->resizeSection(2, 180);  // resource code
+      header->resizeSection(1, 120);  // status
     }
     header->setSectionsMovable(true);
     header->setSortIndicator(0, Qt::AscendingOrder);
@@ -329,6 +327,7 @@ void EntityPanel::refresh()
   }
 
   QHash<QString, QVector<EntityModHit>> hits;
+  m_entityHits.clear();
   m_entityMods.clear();
   m_modToEntity.clear();
   for (const EntityGroup& group : m_groups) {
@@ -358,6 +357,7 @@ void EntityPanel::refresh()
       }
       if (!contributions.isEmpty()) {
         hits.insert(entity.id, contributions);
+        m_entityHits.insert(entity.id, contributions);
         QStringList names;
         for (const EntityModHit& hit : contributions) {
           names.append(hit.modName);
@@ -402,7 +402,6 @@ void EntityPanel::refresh()
       for (const EntityEntry& entity : group.entries) {
         auto* item = new EntityItem(groupItem);
         item->setText(0, entity.name);
-        item->setText(2, entity.id);
         item->setData(0, kRoleEntityId, entity.id);
 
         const QVector<EntityModHit> contributions = hits.value(entity.id);
@@ -531,6 +530,31 @@ void EntityPanel::focusEntitiesForMods(const QStringList& modNames)
   m_selectionSync = false;
 }
 
+void EntityPanel::populateChildren(QTreeWidgetItem* item)
+{
+  if (item == nullptr || item->childCount() > 0) {
+    return;
+  }
+  const QString entityId = item->data(0, kRoleEntityId).toString();
+  if (entityId.isEmpty()) {
+    return;
+  }
+  const QVector<EntityModHit> contributions = m_entityHits.value(entityId);
+  if (contributions.size() < 2) {
+    return;
+  }
+  const QSignalBlocker blocker(m_tree);
+  for (const EntityModHit& hit : contributions) {
+    auto* child = new EntityItem(item);
+    child->setText(0, hit.modName);
+    child->setText(1, QString("%1: %2")
+                          .arg(label("files", QString::fromUtf8("\xE5\x8C\xB9\xE9\x85\x8D\xE6\x96\x87\xE4\xBB\xB6")))
+                          .arg(hit.fileCount));
+    child->setData(0, kRoleMod, hit.modName);
+    child->setToolTip(0, hit.sampleFiles.join("\n"));
+  }
+}
+
 QStringList EntityPanel::selectedEntityIds() const
 {
   QStringList ids;
@@ -631,8 +655,7 @@ void EntityPanel::applyFilter(const QString& text)
       QTreeWidgetItem* item = group->child(e);
       const bool match = needle.isEmpty() ||
                          item->text(0).contains(needle, Qt::CaseInsensitive) ||
-                         item->text(1).contains(needle, Qt::CaseInsensitive) ||
-                         item->text(2).contains(needle, Qt::CaseInsensitive);
+                         item->text(1).contains(needle, Qt::CaseInsensitive);
       item->setHidden(!match);
       if (match) {
         ++visible;
