@@ -78,6 +78,10 @@ PathsSettingsTab::PathsSettingsTab(Settings& s, SettingsDialog& d)
     QSettings gp(gpIni, QSettings::IniFormat);
     ui->gpDataRootEdit->setText(
         gp.value("VFSCore/data_root_override").toString());
+    ui->gpLayerEdit->setText(
+        gp.value("VFSContentLayout/layer").toString());
+    ui->gpRoutingEdit->setText(
+        gp.value("VFSContentLayout/routing").toString());
     ui->gpBareDestEdit->setText(
         gp.value("VFSContentLayout/bare_destination").toString());
     ui->gpBarePatternsEdit->setText(
@@ -225,6 +229,9 @@ void PathsSettingsTab::update()
     QSettings gp(gpIni, QSettings::IniFormat);
     gp.setValue("VFSCore/data_root_override",
                 ui->gpDataRootEdit->text().trimmed());
+    gp.setValue("VFSContentLayout/layer", ui->gpLayerEdit->text().trimmed());
+    gp.setValue("VFSContentLayout/routing",
+                ui->gpRoutingEdit->text().trimmed());
     gp.setValue("VFSContentLayout/bare_destination",
                 ui->gpBareDestEdit->text().trimmed());
     gp.setValue("VFSContentLayout/bare_patterns",

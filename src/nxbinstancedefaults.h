@@ -92,6 +92,15 @@ inline bool nxbEnsureInstanceDefaults(const QString& iniPath,
 
   // Loose community packages (top-level *.xfbin) belong where the game's
   // mod loader reads them; structured data_win32/ mods keep the native map.
+  // Virtual overlay layer first: without these three keys the instance falls
+  // back to the old "bare mods go to spc" behaviour, which is what made the
+  // settings dialog show only bare_destination.
+  setIfEmpty("VFSContentLayout/layer", "${GAME_ROOT}/data_win32");
+  setIfEmpty("VFSContentLayout/routing", "nxb_win32_routing.json");
+  setIfEmpty("VFSContentLayout/infer_nested", "true");
+
+  // Bare destination stays as the fallback for assets the routing table does
+  // not know (old mods), never as the primary mechanism.
   setIfEmpty("VFSContentLayout/bare_destination",
              "${GAME_ROOT}/data_win32/spc");
   setIfEmpty("VFSContentLayout/bare_patterns", "*.xfbin;*.dds;*.png;*.tex");

@@ -1024,7 +1024,7 @@ If you disable this feature, MO will only display official DLCs this way. Please
           <item row="1" column="0">
            <widget class="QLabel" name="gpBareDestLabel">
             <property name="text">
-             <string>裸包目标目录</string>
+             <string>兜底目录（路由表未命中的资源）</string>
             </property>
            </widget>
           </item>
@@ -1034,7 +1034,7 @@ If you disable this feature, MO will only display official DLCs this way. Please
           <item row="2" column="0">
            <widget class="QLabel" name="gpBarePatternsLabel">
             <property name="text">
-             <string>裸包文件匹配规则</string>
+             <string>兜底文件匹配规则</string>
             </property>
            </widget>
           </item>
@@ -1068,7 +1068,27 @@ If you disable this feature, MO will only display official DLCs this way. Please
             </property>
            </widget>
           </item>
+          <item row="6" column="0">
+           <widget class="QLabel" name="gpLayerLabel">
+            <property name="text">
+             <string>虚拟层目录（data_win32）</string>
+            </property>
+           </widget>
+          </item>
           <item row="6" column="1">
+           <widget class="QLineEdit" name="gpLayerEdit"/>
+          </item>
+          <item row="7" column="0">
+           <widget class="QLabel" name="gpRoutingLabel">
+            <property name="text">
+             <string>路由表文件</string>
+            </property>
+           </widget>
+          </item>
+          <item row="7" column="1">
+           <widget class="QLineEdit" name="gpRoutingEdit"/>
+          </item>
+          <item row="8" column="1">
            <widget class="QLabel" name="gpHelpLabel">
             <property name="text">
              <string>可用占位符：${GAME_ROOT}、${DATA_DIR}、${PUBLIC_DOCUMENTS}、${LOCALAPPDATA}、${USERPROFILE}。留空则使用游戏插件默认值。</string>
