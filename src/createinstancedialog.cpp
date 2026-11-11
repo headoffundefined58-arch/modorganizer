@@ -552,8 +552,16 @@ CreateInstanceDialog::CreationInfo CreateInstanceDialog::creationInfo() const
   // directory onto its own parent, so no usable link is ever built.  Keep
   // the instance data in its own folder instead.  Bethesda games are
   // completely unaffected.
+  // Default base directory is AppData (the system drive). Prefer a folder on a
+  // non-system drive - next to MO2, else next to the game - so mods, downloads,
+  // profiles and saves never live on C:. A user-picked path is still honoured.
+  QString preferredBase =
+      nxbPreferredBaseDirectory(QDir(ci.gameLocation), ci.instanceName);
+  if (preferredBase.isEmpty()) {
+    preferredBase = ci.dataPath;
+  }
   ci.paths.base = nxbSafeBaseDirectory(ci.game, QDir(ci.gameLocation),
-                                       ci.paths.base, ci.dataPath);
+                                       ci.paths.base, preferredBase);
 
   return ci;
 }
