@@ -2098,7 +2098,18 @@ std::vector<Mapping> OrganizerCore::fileMapping(const QString& profileName,
       // designated as custom overwrite may be a write target. The
       // overwrite mapping below carries the CREATETARGET flag that
       // materializes a virtual destination the game does not have.
-      if (gameProfileIsBareMod(modPath, gameProfile)) {
+      if (gameProfile.layered()) {
+        // Virtual overlay layer: the mod is projected into <layer> whatever
+        // layout it uses (data_win32/, Root/, a wrapper folder, or loose files
+        // at the root). Emitted here, inside the native priority loop, so
+        // enable/disable, priority, conflict and overwrite keep their meaning.
+        const QVector<GameProfileMapping> projected =
+            gameProfileModMappings(modPath, gameProfile);
+        for (const GameProfileMapping& mapping : projected) {
+          result.insert(result.end(), {mapping.source, mapping.destination,
+                                       mapping.isDirectory, createTarget});
+        }
+      } else if (gameProfileIsBareMod(modPath, gameProfile)) {
         result.insert(result.end(),
                       {QDir::toNativeSeparators(modPath),
                        gameProfile.bareDestination, true, createTarget});

@@ -37,9 +37,15 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMap>
+#include <QSet>
 #include <QSettings>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <QtGlobal>
 
 #include <mutex>
@@ -54,9 +60,23 @@ struct GameProfileConfig
   bool savePerProfile = false;
   bool seedSaves      = false;
 
+  // ---- virtual overlay layer -------------------------------------------
+  // When layerRoot is set every enabled mod is *projected* into it instead of
+  // being mapped onto the game's Data directory. This is how a game whose
+  // engine reads loose files from <game>/data_win32 gets a mod stack that
+  // behaves like a normal MO2 Data tree: same relative path = same file, so
+  // priorities, conflicts and overwrite keep their usual meaning.
+  QString layerRoot;         // absolute; e.g. <game>/data_win32
+  QString routingPath;       // absolute; JSON {"<file name>": "<sub dir>"}
+  bool inferNested = false;  // strip a single wrapper folder around the payload
+  QHash<QString, QString> routing;  // lower-case file name -> sub dir ("" = root)
+  QSet<QString> routingDirs;        // every sub dir the table can produce
+
+  bool layered() const { return !layerRoot.isEmpty(); }
+
   bool isEmpty() const
   {
-    return bareDestination.isEmpty() && saveSource.isEmpty();
+    return bareDestination.isEmpty() && saveSource.isEmpty() && layerRoot.isEmpty();
   }
 };
 
@@ -141,6 +161,38 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
                 "data_win32;data;moddingapi;Root;engine")
           .toString());
 
+  // ---- virtual overlay layer ----
+  const QString layer =
+      ini.value("VFSContentLayout/layer").toString().trimmed();
+  if (!layer.isEmpty()) {
+    config.layerRoot = gpExpandPath(layer, gameRoot, dataDir);
+    config.inferNested =
+        ini.value("VFSContentLayout/infer_nested", true).toBool();
+
+    const QString routing =
+        ini.value("VFSContentLayout/routing").toString().trimmed();
+    if (!routing.isEmpty()) {
+      QString routingFile = routing;
+      if (!QDir::isAbsolutePath(routingFile)) {
+        routingFile = QFileInfo(iniPath).absolutePath() + "/" + routingFile;
+      }
+      config.routingPath = QDir::toNativeSeparators(QDir::cleanPath(routingFile));
+
+      QFile table(config.routingPath);
+      if (table.open(QIODevice::ReadOnly)) {
+        const QJsonDocument doc = QJsonDocument::fromJson(table.readAll());
+        if (doc.isObject()) {
+          const QJsonObject object = doc.object();
+          for (auto it = object.begin(); it != object.end(); ++it) {
+            const QString dir = it.value().toString();
+            config.routing.insert(it.key().toLower(), dir);
+            config.routingDirs.insert(dir);
+          }
+        }
+      }
+    }
+  }
+
   const QString save =
       ini.value("VFSGameProfile/save_source").toString().trimmed();
   if (!save.isEmpty()) {
@@ -220,6 +272,170 @@ inline bool gameProfileIsBareMod(const QString& modPath,
     }
   }
   return false;
+}
+
+// One (source, destination) pair handed to the VFS. A directory entry makes the
+// whole subtree visible at `destination`; a file entry places a single loose
+// file, which is how a mod that keeps its payload in the mod root gets routed
+// into the category the engine looks at.
+struct GameProfileMapping
+{
+  QString source;
+  QString destination;
+  bool isDirectory = true;
+};
+
+// The legacy bare destination expressed relative to the layer root, e.g.
+// <game>/data_win32/spc -> "spc". Files the routing table does not know about
+// keep going there, so mods built for the old scheme keep working unchanged.
+inline QString gpLayerLegacySubdir(const GameProfileConfig& config)
+{
+  if (config.layerRoot.isEmpty() || config.bareDestination.isEmpty()) {
+    return {};
+  }
+  const QString layer = QDir::cleanPath(config.layerRoot);
+  const QString bare  = QDir::cleanPath(config.bareDestination);
+  if (bare == layer) {
+    return {};
+  }
+  if (bare.startsWith(layer + "/")) {
+    return bare.mid(layer.size() + 1);
+  }
+  return {};
+}
+
+inline QString gpLayerPath(const GameProfileConfig& config, const QString& sub,
+                           const QString& name = QString())
+{
+  QString path = QDir::cleanPath(config.layerRoot);
+  if (!sub.isEmpty()) {
+    path += "/" + sub;
+  }
+  if (!name.isEmpty()) {
+    path += "/" + name;
+  }
+  return QDir::toNativeSeparators(path);
+}
+
+// Project a directory that holds loose payload (no data_win32/ or Root/ inside).
+// Each file is routed by name through the CPK-derived table, which is what lets
+// an unzipped community package land exactly where the engine reads it.
+inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
+                           QVector<GameProfileMapping>& out)
+{
+  const QString legacy      = gpLayerLegacySubdir(config);
+  const QStringList files   = dir.entryList(QDir::Files);
+  const QStringList subdirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+
+  QMap<QString, QStringList> byCategory;
+  for (const QString& name : files) {
+    QString category = config.routing.value(name.toLower());
+    if (category.isEmpty()) {
+      category = legacy;  // unknown asset: behave like the old bare scheme
+    }
+    byCategory[category].append(name);
+  }
+
+  bool subdirNeedsRouting = false;
+  for (const QString& sub : subdirs) {
+    if (config.routingDirs.contains(sub)) {
+      subdirNeedsRouting = true;
+    }
+  }
+
+  if (byCategory.size() <= 1 && !subdirNeedsRouting && files.size() <= 4096) {
+    // One mapping for the whole directory. Cheap, and the resulting relative
+    // paths are identical to a "data_win32/..." mod, so MO2 shows the conflict.
+    const QString category =
+        byCategory.isEmpty() ? legacy : byCategory.firstKey();
+    out.append({QDir::toNativeSeparators(dir.absolutePath()),
+                gpLayerPath(config, category), true});
+    return;
+  }
+
+  for (auto it = byCategory.begin(); it != byCategory.end(); ++it) {
+    for (const QString& name : it.value()) {
+      out.append({QDir::toNativeSeparators(dir.filePath(name)),
+                  gpLayerPath(config, it.key(), name), false});
+    }
+  }
+
+  for (const QString& sub : subdirs) {
+    const QString destSub = config.routingDirs.contains(sub)
+                                ? sub
+                                : (legacy.isEmpty() ? sub : legacy + "/" + sub);
+    out.append({QDir::toNativeSeparators(dir.filePath(sub)),
+                gpLayerPath(config, destSub), true});
+  }
+}
+
+// Turn any mod layout into the layer-relative mapping set. Layouts handled, in
+// order: data_win32/ payload, Root/ payload (Root Builder compatible), a single
+// wrapper folder around either of those (and two levels deep), and finally a
+// loose payload at the mod root. Returns an empty vector when the instance has
+// no layer configured, so unpatched behaviour is preserved bit for bit.
+inline QVector<GameProfileMapping> gameProfileModMappings(
+    const QString& modPath, const GameProfileConfig& config)
+{
+  QVector<GameProfileMapping> out;
+  if (!config.layered()) {
+    return out;
+  }
+  QDir dir(modPath);
+  if (!dir.exists()) {
+    return out;
+  }
+
+  auto tryLayout = [&](const QDir& base) -> bool {
+    if (base.exists("data_win32")) {
+      out.append({QDir::toNativeSeparators(base.filePath("data_win32")),
+                  gpLayerPath(config, QString()), true});
+      return true;
+    }
+    if (base.exists("Root")) {
+      const QDir root(base.filePath("Root"));
+      if (root.exists("data_win32")) {
+        out.append({QDir::toNativeSeparators(root.filePath("data_win32")),
+                    gpLayerPath(config, QString()), true});
+      } else {
+        out.append({QDir::toNativeSeparators(root.absolutePath()),
+                    gpLayerPath(config, QString()), true});
+      }
+      return true;
+    }
+    return false;
+  };
+
+  if (tryLayout(dir)) {
+    return out;
+  }
+
+  const QStringList files = dir.entryList(QDir::Files);
+  const QStringList dirs  = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+  if (config.inferNested && files.isEmpty() && dirs.size() == 1) {
+    const QDir wrapper(dir.filePath(dirs.first()));
+    if (tryLayout(wrapper)) {
+      return out;
+    }
+    const QStringList files2 = wrapper.entryList(QDir::Files);
+    const QStringList dirs2 =
+        wrapper.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    if (files2.isEmpty() && dirs2.size() == 1) {
+      // Two wrapper levels is what real archives usually need; deeper than that
+      // is almost always an author mistake, so stop and treat it as loose.
+      const QDir inner(wrapper.filePath(dirs2.first()));
+      if (tryLayout(inner)) {
+        return out;
+      }
+      gpProjectLoose(inner, config, out);
+      return out;
+    }
+    gpProjectLoose(wrapper, config, out);
+    return out;
+  }
+
+  gpProjectLoose(dir, config, out);
+  return out;
 }
 
 // Copy the game's existing saves into the current profile once, so enabling
