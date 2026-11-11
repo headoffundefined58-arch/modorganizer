@@ -81,12 +81,6 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   root->setContentsMargins(0, 0, 0, 0);
   root->setSpacing(2);
 
-  // Ninja / stage switcher, one flat list per group. Sits above the tree, on
-  // the left of the status header, replacing the two group header rows.
-  m_groupBar = new QHBoxLayout();
-  m_groupBar->setContentsMargins(0, 0, 0, 0);
-  m_groupBar->setSpacing(4);
-
   m_tree = new QTreeWidget(this);
   m_tree->setAlternatingRowColors(true);
   m_tree->setUniformRowHeights(true);
@@ -96,8 +90,6 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   // must be able to activate several mods at once.
   m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
   m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
-  m_groupBar->addStretch(1);
-  root->addLayout(m_groupBar);
   root->addWidget(m_tree, 1);
 
   // Filter lives at the bottom right, mirroring MO2's own filter bars.
@@ -130,13 +122,32 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
     return;
   }
 
-  for (int g = 0; g < m_groups.size(); ++g) {
-    auto* button = new QPushButton(m_groups.at(g).name, this);
-    button->setCheckable(true);
-    connect(button, &QPushButton::clicked, this,
-            [this, g]() { setActiveGroup(g); });
-    m_groupBar->insertWidget(m_groupBar->count() - 1, button);
-    m_groupButtons.append(button);
+  // The switcher is embedded in the tree header itself, over the blank name
+  // section: exactly the empty space to the left of the status header.
+  if (QHeaderView* header = m_tree->header()) {
+    m_headerSwitch = new QWidget(header);
+    m_headerSwitch->setAttribute(Qt::WA_TransparentForMouseEvents, false);
+    auto* switchLayout = new QHBoxLayout(m_headerSwitch);
+    switchLayout->setContentsMargins(2, 0, 2, 0);
+    switchLayout->setSpacing(4);
+    for (int g = 0; g < m_groups.size(); ++g) {
+      auto* button = new QPushButton(m_groups.at(g).name, m_headerSwitch);
+      button->setCheckable(true);
+      button->setFlat(true);
+      connect(button, &QPushButton::clicked, this,
+              [this, g]() { setActiveGroup(g); });
+      switchLayout->addWidget(button);
+      m_groupButtons.append(button);
+    }
+    // Keep the overlay glued to the name section when anything resizes or the
+    // user drags the columns around.
+    connect(header, &QHeaderView::geometriesChanged, this,
+            [this]() { positionHeaderSwitch(); });
+    connect(header, &QHeaderView::sectionResized, this,
+            [this](int, int, int) { positionHeaderSwitch(); });
+    connect(header, &QHeaderView::sectionMoved, this,
+            [this](int, int, int) { positionHeaderSwitch(); });
+    QTimer::singleShot(0, this, [this]() { positionHeaderSwitch(); });
   }
   {
     // Restore the group shown last time; default to the first (ninja).
@@ -178,7 +189,11 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
       header->resizeSection(1, 120);  // status
     }
     header->setSectionsMovable(true);
-    header->setSortIndicator(0, Qt::AscendingOrder);
+    // Sort by status; column 0 keeps a blank header because the switcher
+    // buttons are rendered there.
+    if (m_columns.size() > 1) {
+      header->setSortIndicator(1, Qt::AscendingOrder);
+    }
   }
   refresh();
 }
@@ -312,10 +327,30 @@ void EntityPanel::buildMatchIndex()
 void EntityPanel::showEvent(QShowEvent* event)
 {
   QWidget::showEvent(event);
+  positionHeaderSwitch();
   if (m_dirty) {
     m_dirty = false;
     refresh();
   }
+}
+
+void EntityPanel::positionHeaderSwitch()
+{
+  QHeaderView* header = m_tree != nullptr ? m_tree->header() : nullptr;
+  if (header == nullptr || m_headerSwitch == nullptr ||
+      m_groupButtons.isEmpty()) {
+    return;
+  }
+  const int x    = header->sectionViewportPosition(0);
+  const int w    = header->sectionSize(0);
+  const int h    = header->height();
+  if (w <= 0) {
+    m_headerSwitch->hide();
+    return;
+  }
+  m_headerSwitch->setGeometry(x, 0, w, h);
+  m_headerSwitch->show();
+  m_headerSwitch->raise();
 }
 
 void EntityPanel::setActiveGroup(int index)

@@ -100,6 +100,7 @@ private:
   void refreshGroupButtons();
   QFont boldButtonFont() const;
   QFont normalButtonFont() const;
+  void positionHeaderSwitch();
   void applyFilter(const QString& text);
   QString label(const QString& key, const QString& fallback) const;
 
@@ -119,7 +120,9 @@ private:
   QPushButton* m_refreshButton = nullptr;
   QTreeWidget* m_tree = nullptr;
   QTimer* m_debounce = nullptr;
-  QHBoxLayout* m_groupBar = nullptr;
+  // The ninja / stage switcher lives INSIDE the tree header, over the blank
+  // name section, to the left of the status header (user requirement).
+  QWidget* m_headerSwitch = nullptr;
   QVector<QPushButton*> m_groupButtons;
 
   // Which catalog group (ninja / stage) the flat list shows. Persisted in the
