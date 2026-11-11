@@ -21,6 +21,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -35,6 +36,12 @@ struct ModFiles
 };
 
 const int kMaxFilesPerMod = 20000;
+
+// Recursion cap for the "selection changed" call chain. Two views driving each
+// other's selection is a legitimate one-hop round trip; anything deeper means a
+// signal loop is bouncing, and unbounded recursion here terminates the process
+// with a stack overflow instead of an error message.
+const int kMaxSyncDepth = 4;
 
 // Rank stored in Qt::UserRole of the status column: 0 = several mods,
 // 1 = one mod, 2 = pristine. Sorting by that column therefore puts the
@@ -276,7 +283,11 @@ void EntityPanel::scheduleRefresh()
 void EntityPanel::refresh()
 {
   OrganizerCore* core = qobject_cast<OrganizerCore*>(m_core.data());
-  if (!m_available || core == nullptr) {
+  if (!m_available || core == nullptr || m_refreshing) {
+    // m_refreshing: a mod state change can schedule a refresh while one is
+    // still running (the mod list emits once per toggled mod). Rebuilding the
+    // tree from inside a rebuild would delete items that are still being
+    // walked, so the nested call is simply dropped.
     return;
   }
 
@@ -363,71 +374,86 @@ void EntityPanel::refresh()
   const Qt::SortOrder sortOrder =
       m_tree->header() != nullptr ? m_tree->header()->sortIndicatorOrder()
                                   : Qt::AscendingOrder;
-  m_tree->setSortingEnabled(false);
-  m_tree->clear();
 
-  int groupOrder = 0;
-  for (const EntityGroup& group : m_groups) {
-    auto* groupItem = new GroupItem(m_tree, groupOrder++);
-    groupItem->setText(0, group.name);
-    QFont groupFont = groupItem->font(0);
-    groupFont.setBold(true);
-    groupItem->setFont(0, groupFont);
-    groupItem->setExpanded(true);
+  // Keep the user's selection across the rebuild: enabling a mod must not swap
+  // the selection (and, through the panel -> mod list hop, the mod list's
+  // selection) out from under them.
+  const QStringList keepSelected = selectedEntityIds();
 
-    int groupModified = 0;
-    for (const EntityEntry& entity : group.entries) {
-      auto* item = new EntityItem(groupItem);
-      item->setText(0, entity.name);
-      item->setText(2, entity.id);
-      item->setData(0, kRoleEntityId, entity.id);
+  m_refreshing = true;
+  {
+    // Blocking the tree removes the itemSelectionChanged burst that the
+    // rebuild would otherwise emit while the items are being deleted.
+    const QSignalBlocker blockTree(m_tree);
 
-      const QVector<EntityModHit> contributions = hits.value(entity.id);
-      if (contributions.isEmpty()) {
-        item->setText(1, label("original", QString::fromUtf8("\xE5\x8E\x9F\xE7\x89\x88")));
-        item->setData(1, kRoleRank, kRankOriginal);
-        continue;
+    m_tree->setSortingEnabled(false);
+    m_tree->clear();
+
+    int groupOrder = 0;
+    for (const EntityGroup& group : m_groups) {
+      auto* groupItem = new GroupItem(m_tree, groupOrder++);
+      groupItem->setText(0, group.name);
+      QFont groupFont = groupItem->font(0);
+      groupFont.setBold(true);
+      groupItem->setFont(0, groupFont);
+      groupItem->setExpanded(true);
+
+      int groupModified = 0;
+      for (const EntityEntry& entity : group.entries) {
+        auto* item = new EntityItem(groupItem);
+        item->setText(0, entity.name);
+        item->setText(2, entity.id);
+        item->setData(0, kRoleEntityId, entity.id);
+
+        const QVector<EntityModHit> contributions = hits.value(entity.id);
+        if (contributions.isEmpty()) {
+          item->setText(1, label("original", QString::fromUtf8("\xE5\x8E\x9F\xE7\x89\x88")));
+          item->setData(1, kRoleRank, kRankOriginal);
+          continue;
+        }
+
+        ++groupModified;
+        if (contributions.size() == 1) {
+          item->setText(1, label("modified", QString::fromUtf8("\xE5\xB7\xB2\xE4\xBF\xAE\xE6\x94\xB9")));
+          item->setData(1, kRoleRank, kRankModified);
+          item->setForeground(1, QBrush(QColor(255, 183, 77)));
+        } else {
+          item->setText(1, QString("%1 (%2)")
+                               .arg(label("multi", QString::fromUtf8("\xE5\xA4\x9A\xE4\xB8\xAA\x20\x4D\x6F\x64")))
+                               .arg(contributions.size()));
+          item->setData(1, kRoleRank, kRankMulti);
+          item->setForeground(1, QBrush(QColor(239, 83, 80)));
+          QFont statusFont = item->font(1);
+          statusFont.setBold(true);
+          item->setFont(1, statusFont);
+        }
+        item->setData(0, kRoleMod, contributions.first().modName);
+
+        // One child per contributing mod so multi-mod overrides stay readable.
+        for (const EntityModHit& hit : contributions) {
+          auto* child = new EntityItem(item);
+          child->setText(0, hit.modName);
+          child->setText(1, label("fromMod", QString::fromUtf8("\xE6\x9D\xA5\xE8\x87\xAA")));
+          child->setText(2, QString("%1: %2")
+                                .arg(label("files", QString::fromUtf8("\xE5\x8C\xB9\xE9\x85\x8D\xE6\x96\x87\xE4\xBB\xB6")))
+                                .arg(hit.fileCount));
+          child->setData(0, kRoleMod, hit.modName);
+          child->setToolTip(2, hit.sampleFiles.join("\n"));
+        }
       }
-
-      ++groupModified;
-      if (contributions.size() == 1) {
-        item->setText(1, label("modified", QString::fromUtf8("\xE5\xB7\xB2\xE4\xBF\xAE\xE6\x94\xB9")));
-        item->setData(1, kRoleRank, kRankModified);
-        item->setForeground(1, QBrush(QColor(255, 183, 77)));
-      } else {
-        item->setText(1, QString("%1 (%2)")
-                             .arg(label("multi", QString::fromUtf8("\xE5\xA4\x9A\xE4\xB8\xAA\x20\x4D\x6F\x64")))
-                             .arg(contributions.size()));
-        item->setData(1, kRoleRank, kRankMulti);
-        item->setForeground(1, QBrush(QColor(239, 83, 80)));
-        QFont statusFont = item->font(1);
-        statusFont.setBold(true);
-        item->setFont(1, statusFont);
-      }
-      item->setData(0, kRoleMod, contributions.first().modName);
-
-      // One child per contributing mod so multi-mod overrides stay readable.
-      for (const EntityModHit& hit : contributions) {
-        auto* child = new EntityItem(item);
-        child->setText(0, hit.modName);
-        child->setText(1, label("fromMod", QString::fromUtf8("\xE6\x9D\xA5\xE8\x87\xAA")));
-        child->setText(2, QString("%1: %2")
-                              .arg(label("files", QString::fromUtf8("\xE5\x8C\xB9\xE9\x85\x8D\xE6\x96\x87\xE4\xBB\xB6")))
-                              .arg(hit.fileCount));
-        child->setData(0, kRoleMod, hit.modName);
-        child->setToolTip(2, hit.sampleFiles.join("\n"));
+      if (m_tree->columnCount() > 1) {
+        groupItem->setText(1, QString("%1 / %2")
+                                  .arg(groupModified)
+                                  .arg(group.entries.size()));
       }
     }
-    if (m_tree->columnCount() > 1) {
-      groupItem->setText(1, QString("%1 / %2")
-                                .arg(groupModified)
-                                .arg(group.entries.size()));
-    }
+
+    m_tree->setSortingEnabled(true);
+    m_tree->sortItems(sortColumn, sortOrder);
+    applyFilter(m_filter->text());
+    restoreEntitySelection(keepSelected);
   }
-
-  m_tree->setSortingEnabled(true);
-  m_tree->sortItems(sortColumn, sortOrder);
-  applyFilter(m_filter->text());
+  m_refreshing = false;
 }
 
 void EntityPanel::focusEntityForMod(const QString& modName)
@@ -437,7 +463,12 @@ void EntityPanel::focusEntityForMod(const QString& modName)
 
 void EntityPanel::focusEntitiesForMods(const QStringList& modNames)
 {
-  if (!m_available || m_selectionSync || modNames.isEmpty()) {
+  if (!m_available || m_refreshing || m_selectionSync || modNames.isEmpty()) {
+    return;
+  }
+  if (m_syncDepth > kMaxSyncDepth) {
+    // Safety net: a pathological ping-pong must never eat the whole stack,
+    // which is how this used to crash the process instead of just misbehaving.
     return;
   }
 
@@ -453,21 +484,100 @@ void EntityPanel::focusEntitiesForMods(const QStringList& modNames)
   if (wanted.isEmpty()) {
     return;
   }
+  wanted.sort();
 
-  // Changing the tree selection emits itemSelectionChanged; the guard stops
-  // that from driving the mod list straight back into this function.
+  QStringList have = selectedEntityIds();
+  have.sort();
+
   m_selectionSync = true;
-  m_tree->clearSelection();
+  ++m_syncDepth;
+  {
+    // Programmatic selection must not look like a user click: blocking the
+    // tree keeps itemSelectionChanged from re-entering the mod list.
+    const QSignalBlocker blockTree(m_tree);
+
+    QTreeWidgetItem* firstItem = nullptr;
+    if (have != wanted) {
+      m_tree->clearSelection();
+      for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
+        QTreeWidgetItem* group = m_tree->topLevelItem(g);
+        for (int e = 0; e < group->childCount(); ++e) {
+          QTreeWidgetItem* item = group->child(e);
+          if (!wanted.contains(item->data(0, kRoleEntityId).toString())) {
+            continue;
+          }
+          group->setExpanded(true);
+          item->setHidden(false);
+          item->setSelected(true);
+          if (firstItem == nullptr) {
+            firstItem = item;
+          }
+        }
+      }
+    }
+    if (firstItem == nullptr) {
+      // Selection already matched; still scroll so re-clicking a mod works.
+      firstItem = findEntityItem(wanted.first());
+    }
+    if (firstItem != nullptr) {
+      if (firstItem->isHidden()) {
+        firstItem->setHidden(false);
+      }
+      m_tree->setCurrentItem(firstItem);
+      m_tree->scrollToItem(firstItem, QAbstractItemView::PositionAtCenter);
+    }
+  }
+  --m_syncDepth;
+  m_selectionSync = false;
+}
+
+QStringList EntityPanel::selectedEntityIds() const
+{
+  QStringList ids;
+  if (m_tree == nullptr) {
+    return ids;
+  }
+  for (QTreeWidgetItem* item : m_tree->selectedItems()) {
+    QTreeWidgetItem* row = (item->parent() != nullptr) ? item->parent() : item;
+    const QString id = row->data(0, kRoleEntityId).toString();
+    if (!id.isEmpty() && !ids.contains(id)) {
+      ids.append(id);
+    }
+  }
+  return ids;
+}
+
+QTreeWidgetItem* EntityPanel::findEntityItem(const QString& entityId) const
+{
+  if (m_tree == nullptr || entityId.isEmpty()) {
+    return nullptr;
+  }
+  for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
+    QTreeWidgetItem* group = m_tree->topLevelItem(g);
+    for (int e = 0; e < group->childCount(); ++e) {
+      QTreeWidgetItem* item = group->child(e);
+      if (item->data(0, kRoleEntityId).toString() == entityId) {
+        return item;
+      }
+    }
+  }
+  return nullptr;
+}
+
+void EntityPanel::restoreEntitySelection(const QStringList& entityIds)
+{
+  if (m_tree == nullptr || entityIds.isEmpty()) {
+    return;
+  }
   QTreeWidgetItem* firstItem = nullptr;
   for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
     QTreeWidgetItem* group = m_tree->topLevelItem(g);
     for (int e = 0; e < group->childCount(); ++e) {
       QTreeWidgetItem* item = group->child(e);
-      if (!wanted.contains(item->data(0, kRoleEntityId).toString())) {
+      if (!entityIds.contains(item->data(0, kRoleEntityId).toString())) {
         continue;
       }
       group->setExpanded(true);
-      item->setHidden(false);
       item->setSelected(true);
       if (firstItem == nullptr) {
         firstItem = item;
@@ -476,14 +586,15 @@ void EntityPanel::focusEntitiesForMods(const QStringList& modNames)
   }
   if (firstItem != nullptr) {
     m_tree->setCurrentItem(firstItem);
-    m_tree->scrollToItem(firstItem, QAbstractItemView::PositionAtCenter);
   }
-  m_selectionSync = false;
 }
 
 void EntityPanel::currentEntityChanged()
 {
-  if (!m_available || m_selectionSync || !m_onModActivated) {
+  if (!m_available || m_refreshing || m_selectionSync || !m_onModActivated) {
+    return;
+  }
+  if (m_syncDepth > kMaxSyncDepth) {
     return;
   }
 
@@ -501,7 +612,9 @@ void EntityPanel::currentEntityChanged()
   }
 
   m_selectionSync = true;
+  ++m_syncDepth;
   m_onModActivated(mods);
+  --m_syncDepth;
   m_selectionSync = false;
 }
 

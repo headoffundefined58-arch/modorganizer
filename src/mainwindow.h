@@ -482,6 +482,18 @@ private slots:  // ui slots
   void readSettings();
 
   void setupModList();
+
+  // Entity panel <-> mod list navigation. Both directions are applied from a
+  // queued call with an explicit "we are the ones changing the selection" flag,
+  // so a selection signal can never bounce back into the other view while that
+  // view is still inside its own signal emission (that recursion used to grow
+  // the stack until the process died).
+  void applyEntityModSelection(const QStringList& modNames);
+  QStringList m_pendingFocusMods;
+  QStringList m_pendingEntityMods;
+  bool m_focusQueued = false;
+  bool m_entitySelectionQueued = false;
+  bool m_syncingModSelection = false;
 };
 
 #endif  // MAINWINDOW_H

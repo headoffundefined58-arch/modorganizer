@@ -36,6 +36,7 @@ class QLineEdit;
 class QPushButton;
 class QTimer;
 class QTreeWidget;
+class QTreeWidgetItem;
 class OrganizerCore;
 
 struct EntityModHit
@@ -88,6 +89,11 @@ private:
   QString label(const QString& key, const QString& fallback) const;
   void currentEntityChanged();
 
+  // Entity ids of the currently selected rows (child rows map to their parent).
+  QStringList selectedEntityIds() const;
+  QTreeWidgetItem* findEntityItem(const QString& entityId) const;
+  void restoreEntitySelection(const QStringList& entityIds);
+
   // QPointer: an instance switch rebuilds OrganizerCore, which nulls this out
   // instead of leaving a dangling pointer behind.
   QPointer<QObject> m_core;
@@ -109,4 +115,11 @@ private:
 
   // Breaks the panel <-> mod list selection feedback loop.
   bool m_selectionSync = false;
+
+  // True while refresh() rebuilds the tree: item pointers are invalid then, so
+  // both selection callbacks must stay out of the way.
+  bool m_refreshing = false;
+
+  // Depth of the panel <-> mod list call chain, used as a hard recursion cap.
+  int m_syncDepth = 0;
 };
