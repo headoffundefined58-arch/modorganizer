@@ -2106,8 +2106,14 @@ std::vector<Mapping> OrganizerCore::fileMapping(const QString& profileName,
         const QVector<GameProfileMapping> projected =
             gameProfileModMappings(modPath, gameProfile);
         for (const GameProfileMapping& mapping : projected) {
+          // createTarget is unconditional here: USVFS discards a mapping whose
+          // destination does not exist yet, and stays silent about it ("<path>
+          // doesn't exist" in the usvfs log, nothing in the UI). The projected
+          // destinations are engine category folders (data\spc, data\spcload,
+          // data\sound\Voice\JP ...) and a mod is usually the first thing to
+          // populate them, so the target has to be creatable.
           result.insert(result.end(), {mapping.source, mapping.destination,
-                                       mapping.isDirectory, createTarget});
+                                       mapping.isDirectory, true});
         }
       } else if (gameProfileIsBareMod(modPath, gameProfile)) {
         result.insert(result.end(),
