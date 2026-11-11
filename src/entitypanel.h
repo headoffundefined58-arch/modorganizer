@@ -83,6 +83,12 @@ public:
   void refresh();
   void scheduleRefresh();
 
+  // Select (not scroll to) the entities the given mods override. This is the
+  // one-way link from the mod list to the panel: picking a mod shows its ninja
+  // or stage on the right. Deliberately does NOT scroll, and there is no
+  // reverse direction - both used to fight with the mod list's own selection.
+  void selectEntitiesForMods(const QStringList& modNames);
+
 protected:
   void showEvent(QShowEvent* event) override;
 
@@ -124,6 +130,9 @@ private:
 
   // entity id -> contributing mods, kept so children can be built lazily
   QHash<QString, QVector<EntityModHit>> m_entityHits;
+
+  // mod name -> first entity it overrides (for mod list -> panel selection)
+  QHash<QString, QString> m_modToEntity;
 
   // True while refresh() rebuilds the tree: item pointers are invalid then.
   bool m_refreshing = false;

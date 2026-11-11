@@ -38,14 +38,9 @@ struct ModFiles
   QStringList files;
 };
 
+// Upper bound on how many files a single mod contributes: a mod with 20k files
+// is a packaging accident, and scanning it would block the UI for no benefit.
 const int kMaxFilesPerMod = 20000;
-
-const int kMaxFilesPerMod = 20000;
-
-// Recursion cap for the "selection changed" call chain. Two views driving each
-// other's selection is a legitimate one-hop round trip; anything deeper means a
-// signal loop is bouncing, and unbounded recursion here terminates the process
-// with a stack overflow instead of an error message.
 
 // Rank stored in Qt::UserRole of the status column: 0 = several mods,
 // 1 = one mod, 2 = pristine. Sorting by that column therefore puts the
@@ -428,6 +423,7 @@ void EntityPanel::refresh()
 
   QHash<QString, QVector<EntityModHit>> hits;
   m_entityHits.clear();
+  m_modToEntity.clear();
   int flat = 0;
   for (const EntityGroup& group : m_groups) {
     for (const EntityEntry& entity : group.entries) {
@@ -442,6 +438,11 @@ void EntityPanel::refresh()
       if (!contributions.isEmpty()) {
         hits.insert(entity.id, contributions);
         m_entityHits.insert(entity.id, contributions);
+        for (const EntityModHit& hit : contributions) {
+          if (!m_modToEntity.contains(hit.modName)) {
+            m_modToEntity.insert(hit.modName, entity.id);
+          }
+        }
       }
       ++flat;
     }
@@ -537,6 +538,56 @@ void EntityPanel::refresh()
     restoreEntitySelection(keepSelected);
   }
   m_refreshing = false;
+}
+
+void EntityPanel::selectEntitiesForMods(const QStringList& modNames)
+{
+  if (!m_available || m_refreshing || m_tree == nullptr || modNames.isEmpty()) {
+    return;
+  }
+  if (!isVisible()) {
+    // Nothing on screen to select; when the tab is shown the tree is rebuilt
+    // anyway and the user's next click re-triggers this.
+    return;
+  }
+
+  QStringList wanted;
+  for (const QString& modName : modNames) {
+    const QString entityId = m_modToEntity.value(modName);
+    if (!entityId.isEmpty() && !wanted.contains(entityId)) {
+      wanted.append(entityId);
+    }
+  }
+  if (wanted.isEmpty()) {
+    // The selected mod overrides nothing in the catalog: leave the panel as it
+    // is instead of clearing it, so browsing unmodded mods is not jarring.
+    return;
+  }
+
+  // Blocked: changing the selection programmatically must not look like a user
+  // click (the panel no longer drives the mod list, but the itemSelectionChanged
+  // burst below would still cost time for no reason).
+  const QSignalBlocker blocker(m_tree);
+  m_tree->clearSelection();
+  QTreeWidgetItem* first = nullptr;
+  for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
+    QTreeWidgetItem* group = m_tree->topLevelItem(g);
+    for (int e = 0; e < group->childCount(); ++e) {
+      QTreeWidgetItem* item = group->child(e);
+      if (!wanted.contains(item->data(0, kRoleEntityId).toString())) {
+        continue;
+      }
+      group->setExpanded(true);
+      item->setSelected(true);
+      if (first == nullptr) {
+        first = item;
+      }
+    }
+  }
+  if (first != nullptr) {
+    // setCurrentItem only; no scrollToItem - the jump is what was removed.
+    m_tree->setCurrentItem(first);
+  }
 }
 
 void EntityPanel::populateChildren(QTreeWidgetItem* item)

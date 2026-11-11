@@ -539,6 +539,28 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
             });
     connect(m_OrganizerCore.modList(), &QAbstractItemModel::modelReset, entityPanel,
             [entityPanel]() { entityPanel->scheduleRefresh(); });
+
+    // One-way link: the mod selected on the left makes the panel show the ninja
+    // or stage it overrides. No scrolling, and nothing is fed back into the mod
+    // list, so a third-party mod-list plugin (separators, sticky notes, ...)
+    // never sees its selection changed from here.
+    if (QItemSelectionModel* modSelection = ui->modList->selectionModel()) {
+      connect(modSelection, &QItemSelectionModel::selectionChanged, entityPanel,
+              [this, entityPanel](const QItemSelection&, const QItemSelection&) {
+                QItemSelectionModel* sel = ui->modList->selectionModel();
+                if (sel == nullptr) {
+                  return;
+                }
+                QStringList names;
+                for (const QModelIndex& row : sel->selectedRows()) {
+                  const QString name = row.data().toString();
+                  if (!name.isEmpty() && !names.contains(name)) {
+                    names.append(name);
+                  }
+                }
+                entityPanel->selectEntitiesForMods(names);
+              });
+    }
     QPointer<QTabWidget> liveTabs = ui->tabWidget;
     QPointer<QWidget> liveTab    = ui->entityTab;
     connect(ui->tabWidget, &QTabWidget::currentChanged, entityPanel,
