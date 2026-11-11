@@ -317,6 +317,22 @@ inline QString gpLayerPath(const GameProfileConfig& config, const QString& sub,
   return QDir::toNativeSeparators(path);
 }
 
+// Files that are actual game payload. meta.ini is MO2's own metadata and must
+// not count as content: a package that is "meta.ini + one wrapper folder" is a
+// nested mod, not a flat one, and meta.ini must never be projected into the
+// game directory.
+inline QStringList gpPayloadFiles(const QDir& dir)
+{
+  QStringList result;
+  const QFileInfoList entries = dir.entryInfoList(QDir::Files);
+  for (const QFileInfo& info : entries) {
+    if (info.fileName().compare("meta.ini", Qt::CaseInsensitive) != 0) {
+      result.append(info.fileName());
+    }
+  }
+  return result;
+}
+
 // Project a directory that holds loose payload (no data_win32/ or Root/ inside).
 // Each file is routed by name through the CPK-derived table, which is what lets
 // an unzipped community package land exactly where the engine reads it.
@@ -324,7 +340,7 @@ inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
                            QVector<GameProfileMapping>& out)
 {
   const QString legacy      = gpLayerLegacySubdir(config);
-  const QStringList files   = dir.entryList(QDir::Files);
+  const QStringList files   = gpPayloadFiles(dir);
   const QStringList subdirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
 
   QMap<QString, QStringList> byCategory;
@@ -361,9 +377,34 @@ inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
   }
 
   for (const QString& sub : subdirs) {
-    const QString destSub = config.routingDirs.contains(sub)
-                                ? sub
-                                : (legacy.isEmpty() ? sub : legacy + "/" + sub);
+    if (config.routingDirs.contains(sub)) {
+      // The folder already names a real category (sound/, ui/, effect/ ...):
+      // keep its structure.
+      out.append({QDir::toNativeSeparators(dir.filePath(sub)),
+                  gpLayerPath(config, sub), true});
+      continue;
+    }
+
+    // Otherwise this is a wrapper folder left over from unzipping. If its
+    // payload is flat, project the files individually so they land in the real
+    // category instead of under spc/<wrapper name>/.
+    const QDir subDir(dir.filePath(sub));
+    const QStringList subFiles = gpPayloadFiles(subDir);
+    const QStringList subDirs =
+        subDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    if (subDirs.isEmpty() && !subFiles.isEmpty() && subFiles.size() <= 256) {
+      for (const QString& name : subFiles) {
+        QString category = config.routing.value(name.toLower());
+        if (category.isEmpty()) {
+          category = legacy;
+        }
+        out.append({QDir::toNativeSeparators(subDir.filePath(name)),
+                    gpLayerPath(config, category, name), false});
+      }
+      continue;
+    }
+
+    const QString destSub = legacy.isEmpty() ? sub : legacy + "/" + sub;
     out.append({QDir::toNativeSeparators(dir.filePath(sub)),
                 gpLayerPath(config, destSub), true});
   }
@@ -410,14 +451,14 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
     return out;
   }
 
-  const QStringList files = dir.entryList(QDir::Files);
+  const QStringList files = gpPayloadFiles(dir);
   const QStringList dirs  = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
   if (config.inferNested && files.isEmpty() && dirs.size() == 1) {
     const QDir wrapper(dir.filePath(dirs.first()));
     if (tryLayout(wrapper)) {
       return out;
     }
-    const QStringList files2 = wrapper.entryList(QDir::Files);
+    const QStringList files2 = gpPayloadFiles(wrapper);
     const QStringList dirs2 =
         wrapper.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
     if (files2.isEmpty() && dirs2.size() == 1) {
