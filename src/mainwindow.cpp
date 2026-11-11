@@ -2647,6 +2647,12 @@ void MainWindow::modRenamed(const QString& oldName, const QString& newName)
   // immediately refresh the active profile because the data in memory is invalid
   m_OrganizerCore.currentProfile()->refreshModStatus();
 
+  // Flush modlist.txt right away. renameModInAllProfiles() rewrites the file on
+  // disk, but a queued write from the same session can overwrite it with the old
+  // name afterwards - the renamed mod then falls out of the list (shows up as
+  // disabled and disappears from the VFS).
+  m_OrganizerCore.currentProfile()->writeModlistNow(true);
+
   // also fix the directory structure
   try {
     if (m_OrganizerCore.directoryStructure()->originExists(ToWString(oldName))) {

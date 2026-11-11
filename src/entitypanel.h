@@ -94,6 +94,11 @@ private:
   QTreeWidgetItem* findEntityItem(const QString& entityId) const;
   void restoreEntitySelection(const QStringList& entityIds);
 
+  // Rows for "which mods touch this entity" are created only when the branch is
+  // expanded: one ninja edited by ten mods used to add ten child rows during
+  // every rebuild, which is what made the panel crawl and sometimes crash.
+  void populateChildren(QTreeWidgetItem* item);
+
   // QPointer: an instance switch rebuilds OrganizerCore, which nulls this out
   // instead of leaving a dangling pointer behind.
   QPointer<QObject> m_core;
@@ -112,6 +117,11 @@ private:
   QHash<QString, QStringList> m_entityMods;
   QHash<QString, QString> m_modToEntity;
   std::function<void(const QStringList&)> m_onModActivated;
+
+  // entity id -> contributing mods, kept so children can be built lazily
+  QHash<QString, QVector<EntityModHit>> m_entityHits;
+  // fingerprint of the last rebuild input, to skip no-op refreshes
+  QString m_lastFingerprint;
 
   // Breaks the panel <-> mod list selection feedback loop.
   bool m_selectionSync = false;
