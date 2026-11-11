@@ -116,7 +116,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QAbstractItemModel>
 #include <QItemSelection>
 #include <QItemSelectionModel>
-#include <QSortFilterProxyModel>
+#include <QAbstractProxyModel>
 #include <QVector>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -253,9 +253,12 @@ QModelIndex mapSourceToView(QAbstractItemModel* viewModel,
     return sourceIndex;
   }
 
-  QVector<QSortFilterProxyModel*> chain;
+  // QAbstractProxyModel, not QSortFilterProxyModel: MO2's group-by proxies
+  // (ModListByPriorityProxy, ...) derive from QAbstractProxyModel directly, and
+  // the panel -> mod list hop has to keep working with grouping enabled.
+  QVector<QAbstractProxyModel*> chain;
   QAbstractItemModel* model = viewModel;
-  while (auto* proxy = qobject_cast<QSortFilterProxyModel*>(model)) {
+  while (auto* proxy = qobject_cast<QAbstractProxyModel*>(model)) {
     chain.append(proxy);
     model = proxy->sourceModel();
     if (model == nullptr) {
