@@ -193,6 +193,12 @@ EntityPanel::~EntityPanel()
   }
 }
 
+QString EntityPanel::label(const QString& key, const QString& fallback) const
+{
+  const QString value = m_labels.value(key).toString();
+  return value.isEmpty() ? fallback : value;
+}
+
 bool EntityPanel::loadCatalog()
 {
   const QString iniPath = gameProfileIniPath();
