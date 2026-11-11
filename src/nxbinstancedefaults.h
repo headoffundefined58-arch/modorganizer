@@ -88,28 +88,28 @@ inline bool nxbEnsureInstanceDefaults(const QString& iniPath,
     changed = true;
   }
 
-  // Migration: earlier builds pointed the layer at <game>/data_win32, which this
-  // title does not have (it ships loose files under <game>/data). USVFS then
-  // dropped every mapping with "<layer> doesn't exist" and the game ran fully
-  // unmodded. Rewrite stale values instead of only filling empty ones, so an
-  // existing instance heals itself on the next start.
+  // Migration: build 8500d21 briefly pointed the layer at <game>/data, based on
+  // the wrong assumption that the engine reads loose files there. Empirically it
+  // does not - data/ has lower priority than the CPKs, so mods mapped there
+  // never apply (the user played fine with the data_win32 layer and lost mods
+  // the moment it switched to data). Heal instances back to data_win32.
   {
     const QString layerKey = "VFSContentLayout/layer";
     const QString bareKey  = "VFSContentLayout/bare_destination";
-    const QString looseRoot = QDir::toNativeSeparators(
-        gameRoot.absoluteFilePath("data"));
 
-    if (QDir(looseRoot).exists()) {
-      const QString layer = ini.value(layerKey).toString().trimmed();
-      if (layer.endsWith("data_win32", Qt::CaseInsensitive)) {
-        ini.setValue(layerKey, "${GAME_ROOT}/data");
-        changed = true;
-      }
-      const QString bare = ini.value(bareKey).toString().trimmed();
-      if (bare.contains("data_win32", Qt::CaseInsensitive)) {
-        ini.setValue(bareKey, QString(bare).replace("data_win32", "data"));
-        changed = true;
-      }
+    const QString layer = ini.value(layerKey).toString().trimmed();
+    const bool pointsAtPlainData =
+        layer.endsWith("/data", Qt::CaseInsensitive) &&
+        !layer.endsWith("data_win32", Qt::CaseInsensitive);
+    if (pointsAtPlainData) {
+      ini.setValue(layerKey, "${GAME_ROOT}/data_win32");
+      changed = true;
+    }
+    const QString bare = ini.value(bareKey).toString().trimmed();
+    if (bare.endsWith("/data/spc", Qt::CaseInsensitive)) {
+      ini.setValue(bareKey, QString(bare).replace(
+          QString("/data/spc"), QString("/data_win32/spc")));
+      changed = true;
     }
   }
 
@@ -118,14 +118,14 @@ inline bool nxbEnsureInstanceDefaults(const QString& iniPath,
   // Virtual overlay layer first: without these three keys the instance falls
   // back to the old "bare mods go to spc" behaviour, which is what made the
   // settings dialog show only bare_destination.
-  setIfEmpty("VFSContentLayout/layer", "${GAME_ROOT}/data");
+  setIfEmpty("VFSContentLayout/layer", "${GAME_ROOT}/data_win32");
   setIfEmpty("VFSContentLayout/routing", "nxb_win32_routing.json");
   setIfEmpty("VFSContentLayout/infer_nested", "true");
 
   // Bare destination stays as the fallback for assets the routing table does
   // not know (old mods), never as the primary mechanism.
   setIfEmpty("VFSContentLayout/bare_destination",
-             "${GAME_ROOT}/data/spc");
+             "${GAME_ROOT}/data_win32/spc");
   setIfEmpty("VFSContentLayout/bare_patterns", "*.xfbin;*.dds;*.png;*.tex");
   setIfEmpty("VFSContentLayout/layout_markers",
              "data_win32;data;moddingapi;Root;engine");
