@@ -53,39 +53,6 @@ const int kRoleRank = Qt::UserRole + 1;
 const int kRoleMod = Qt::UserRole + 2;
 const int kRoleEntityId = Qt::UserRole + 3;
 
-// sortItems() also reorders top-level items. Sorting by status compared the
-// group headers' "0 / 109" against "16 / 359" as plain text, which pushed the
-// stage group above the ninja group. GroupItem ignores the sort column and
-// keeps the catalog's group order.
-const int kRoleGroupOrder = Qt::UserRole + 4;
-
-class GroupItem : public QTreeWidgetItem
-{
-public:
-  explicit GroupItem(QTreeWidget* parent, int order) : QTreeWidgetItem(parent)
-  {
-    setData(0, kRoleGroupOrder, order);
-  }
-
-  bool operator<(const QTreeWidgetItem& other) const override
-  {
-    const QVariant mine   = data(0, kRoleGroupOrder);
-    const QVariant theirs = other.data(0, kRoleGroupOrder);
-    if (mine.isValid() && theirs.isValid()) {
-      // QTreeWidget implements descending order by evaluating "other < this",
-      // which would flip the fixed group order whenever the user clicks a
-      // header twice. Compensate so both directions keep the catalog order.
-      QTreeWidget* tree = treeWidget();
-      const bool descending =
-          tree != nullptr && tree->header() != nullptr &&
-          tree->header()->sortIndicatorOrder() == Qt::DescendingOrder;
-      return descending ? mine.toInt() > theirs.toInt()
-                        : mine.toInt() < theirs.toInt();
-    }
-    return QTreeWidgetItem::operator<(other);
-  }
-};
-
 // Lets the status column sort by rank instead of by its localized text.
 class EntityItem : public QTreeWidgetItem
 {
@@ -114,6 +81,12 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   root->setContentsMargins(0, 0, 0, 0);
   root->setSpacing(2);
 
+  // Ninja / stage switcher, one flat list per group. Sits above the tree, on
+  // the left of the status header, replacing the two group header rows.
+  m_groupBar = new QHBoxLayout();
+  m_groupBar->setContentsMargins(0, 0, 0, 0);
+  m_groupBar->setSpacing(4);
+
   m_tree = new QTreeWidget(this);
   m_tree->setAlternatingRowColors(true);
   m_tree->setUniformRowHeights(true);
@@ -123,6 +96,8 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   // must be able to activate several mods at once.
   m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
   m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
+  m_groupBar->addStretch(1);
+  root->addLayout(m_groupBar);
   root->addWidget(m_tree, 1);
 
   // Filter lives at the bottom right, mirroring MO2's own filter bars.
@@ -154,6 +129,28 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   if (!m_available) {
     return;
   }
+
+  for (int g = 0; g < m_groups.size(); ++g) {
+    auto* button = new QPushButton(m_groups.at(g).name, this);
+    button->setCheckable(true);
+    connect(button, &QPushButton::clicked, this,
+            [this, g]() { setActiveGroup(g); });
+    m_groupBar->insertWidget(m_groupBar->count() - 1, button);
+    m_groupButtons.append(button);
+  }
+  {
+    // Restore the group shown last time; default to the first (ninja).
+    QSettings ini(m_iniPath, QSettings::IniFormat);
+    const QString last =
+        ini.value("VFSEntityPanel/active_group").toString().trimmed();
+    for (int g = 0; g < m_groups.size(); ++g) {
+      if (m_groups.at(g).id == last) {
+        m_activeGroup = g;
+        break;
+      }
+    }
+  }
+  refreshGroupButtons();
 
   // Fallbacks are ASCII-only UTF-8 byte escapes: MSVC has no /utf-8 flag,
   // so a raw CJK literal would depend on the runner code page. The JSON
@@ -206,6 +203,7 @@ bool EntityPanel::loadCatalog()
     return false;
   }
 
+  m_iniPath = iniPath;
   QSettings ini(iniPath, QSettings::IniFormat);
   if (!ini.childGroups().contains(QString("VFSEntityPanel"))) {
     return false;
@@ -317,6 +315,44 @@ void EntityPanel::showEvent(QShowEvent* event)
   if (m_dirty) {
     m_dirty = false;
     refresh();
+  }
+}
+
+void EntityPanel::setActiveGroup(int index)
+{
+  if (index < 0 || index >= m_groups.size()) {
+    return;
+  }
+  if (index != m_activeGroup) {
+    m_activeGroup = index;
+    if (!m_iniPath.isEmpty()) {
+      QSettings ini(m_iniPath, QSettings::IniFormat);
+      ini.setValue("VFSEntityPanel/active_group", m_groups.at(index).id);
+    }
+    refresh();
+  }
+  refreshGroupButtons();
+}
+
+QFont EntityPanel::boldButtonFont() const
+{
+  QFont f = m_tree != nullptr ? m_tree->font() : font();
+  f.setBold(true);
+  return f;
+}
+
+QFont EntityPanel::normalButtonFont() const
+{
+  return m_tree != nullptr ? m_tree->font() : font();
+}
+
+void EntityPanel::refreshGroupButtons()
+{
+  for (int g = 0; g < m_groupButtons.size() && g < m_groups.size(); ++g) {
+    QPushButton* button = m_groupButtons.at(g);
+    const bool active = (g == m_activeGroup);
+    button->setChecked(active);
+    button->setFont(active ? boldButtonFont() : normalButtonFont());
   }
 }
 
@@ -459,10 +495,27 @@ void EntityPanel::refresh()
       m_tree->header() != nullptr ? m_tree->header()->sortIndicatorOrder()
                                   : Qt::AscendingOrder;
 
-  // Keep the user's selection across the rebuild: enabling a mod must not swap
-  // the selection (and, through the panel -> mod list hop, the mod list's
-  // selection) out from under them.
+  // Keep the user's selection across the rebuild.
   const QStringList keepSelected = selectedEntityIds();
+
+  // Per-group counts for the switcher buttons, computed for every group so the
+  // inactive tab keeps its "modified / total" up to date.
+  QVector<QPair<int, int>> groupCounts(m_groups.size());
+  {
+    int g = 0;
+    int flat = 0;
+    for (const EntityGroup& group : m_groups) {
+      int modified = 0;
+      for (const EntityEntry& entity : group.entries) {
+        if (!counts.at(flat).isEmpty()) {
+          ++modified;
+        }
+        ++flat;
+      }
+      groupCounts[g] = qMakePair(modified, group.entries.size());
+      ++g;
+    }
+  }
 
   m_refreshing = true;
   {
@@ -473,68 +526,41 @@ void EntityPanel::refresh()
     m_tree->setSortingEnabled(false);
     m_tree->clear();
 
-    int groupOrder = 0;
-    for (const EntityGroup& group : m_groups) {
-      auto* groupItem = new GroupItem(m_tree, groupOrder++);
-      groupItem->setText(0, group.name);
-      QFont groupFont = groupItem->font(0);
-      groupFont.setBold(true);
-      groupItem->setFont(0, groupFont);
-      groupItem->setExpanded(true);
+    // Flat list of the active group only; the switcher buttons pick the group.
+    const int groupIndex = qBound(0, m_activeGroup, m_groups.size() - 1);
+    const EntityGroup& group = m_groups.at(groupIndex);
+    for (const EntityEntry& entity : group.entries) {
+      auto* item = new EntityItem(m_tree);
+      item->setText(0, entity.name);
+      item->setData(0, kRoleEntityId, entity.id);
 
-      int groupModified = 0;
-      for (const EntityEntry& entity : group.entries) {
-        auto* item = new EntityItem(groupItem);
-        item->setText(0, entity.name);
-        item->setData(0, kRoleEntityId, entity.id);
-
-        const QVector<EntityModHit> contributions = hits.value(entity.id);
-        if (contributions.isEmpty()) {
-          item->setText(1, label("original", QString::fromUtf8("\xE5\x8E\x9F\xE7\x89\x88")));
-          item->setData(1, kRoleRank, kRankOriginal);
-          continue;
-        }
-
-        ++groupModified;
-        if (contributions.size() == 1) {
-          item->setText(1, label("modified", QString::fromUtf8("\xE5\xB7\xB2\xE4\xBF\xAE\xE6\x94\xB9")));
-          item->setData(1, kRoleRank, kRankModified);
-          item->setForeground(1, QBrush(QColor(255, 183, 77)));
-        } else {
-          item->setText(1, QString("%1 (%2)")
-                               .arg(label("multi", QString::fromUtf8("\xE5\xA4\x9A\xE4\xB8\xAA\x20\x4D\x6F\x64")))
-                               .arg(contributions.size()));
-          item->setData(1, kRoleRank, kRankMulti);
-          item->setForeground(1, QBrush(QColor(239, 83, 80)));
-          QFont statusFont = item->font(1);
-          statusFont.setBold(true);
-          item->setFont(1, statusFont);
-        }
-        item->setData(0, kRoleMod, contributions.first().modName);
-
-        // One child per contributing mod so multi-mod overrides stay readable.
-        for (const EntityModHit& hit : contributions) {
-          auto* child = new EntityItem(item);
-          child->setText(0, hit.modName);
-          child->setText(1, label("fromMod", QString::fromUtf8("\xE6\x9D\xA5\xE8\x87\xAA")));
-          child->setText(2, QString("%1: %2")
-                                .arg(label("files", QString::fromUtf8("\xE5\x8C\xB9\xE9\x85\x8D\xE6\x96\x87\xE4\xBB\xB6")))
-                                .arg(hit.fileCount));
-          child->setData(0, kRoleMod, hit.modName);
-          child->setToolTip(2, hit.sampleFiles.join("\n"));
-        }
+      const QVector<EntityModHit> contributions = hits.value(entity.id);
+      if (contributions.isEmpty()) {
+        item->setText(1, label("original", QString::fromUtf8("\xE5\x8E\x9F\xE7\x89\x88")));
+        item->setData(1, kRoleRank, kRankOriginal);
+        continue;
       }
-      if (m_tree->columnCount() > 1) {
-        // 忍者 / 舞台 are independent blocks, not ordinary rows: span the header
-        // across the columns, tint it and give it height so the two sections
-        // read as separate groups at a glance.
-        groupItem->setText(0, QString("%1   %2 / %3")
-                                  .arg(group.name)
-                                  .arg(groupModified)
-                                  .arg(group.entries.size()));
-        groupItem->setFirstColumnSpanned(true);
-        groupItem->setBackground(0, QBrush(QColor(0xE8, 0xEE, 0xF7)));
-        groupItem->setSizeHint(0, QSize(0, 30));
+
+      if (contributions.size() == 1) {
+        item->setText(1, label("modified", QString::fromUtf8("\xE5\xB7\xB2\xE4\xBF\xAE\xE6\x94\xB9")));
+        item->setData(1, kRoleRank, kRankModified);
+        item->setForeground(1, QBrush(QColor(255, 183, 77)));
+      } else {
+        item->setText(1, QString("%1 (%2)")
+                             .arg(label("multi", QString::fromUtf8("\xE5\xA4\x9A\xE4\xB8\xAA\x20\x4D\x6F\x64")))
+                             .arg(contributions.size()));
+        item->setData(1, kRoleRank, kRankMulti);
+        item->setForeground(1, QBrush(QColor(239, 83, 80)));
+        QFont statusFont = item->font(1);
+        statusFont.setBold(true);
+        item->setFont(1, statusFont);
+      }
+      item->setData(0, kRoleMod, contributions.first().modName);
+
+      // Children ("which mods contribute") are built lazily on expand: a ninja
+      // edited by many mods must not multiply the row count of every rebuild.
+      if (contributions.size() > 1) {
+        item->setChildIndicatorPolicy(QTreeWidgetItem::ShowIndicator);
       }
     }
 
@@ -544,6 +570,16 @@ void EntityPanel::refresh()
     restoreEntitySelection(keepSelected);
   }
   m_refreshing = false;
+
+  // Button captions carry the same "modified / total" counters the old group
+  // header rows showed.
+  for (int g = 0; g < m_groupButtons.size() && g < m_groups.size(); ++g) {
+    m_groupButtons.at(g)->setText(QString("%1  %2 / %3")
+                                      .arg(m_groups.at(g).name)
+                                      .arg(groupCounts.at(g).first)
+                                      .arg(groupCounts.at(g).second));
+  }
+  refreshGroupButtons();
 }
 
 void EntityPanel::selectEntitiesForMods(const QStringList& modNames)
@@ -570,24 +606,40 @@ void EntityPanel::selectEntitiesForMods(const QStringList& modNames)
     return;
   }
 
+  // The active tab may not hold the wanted entities (a stage mod selected
+  // while the ninja tab is open): switch tabs, then select.
+  bool onTab = false;
+  for (const EntityEntry& entity : m_groups.at(m_activeGroup).entries) {
+    if (wanted.contains(entity.id)) {
+      onTab = true;
+      break;
+    }
+  }
+  if (!onTab) {
+    for (int g = 0; g < m_groups.size(); ++g) {
+      for (const EntityEntry& entity : m_groups.at(g).entries) {
+        if (wanted.contains(entity.id)) {
+          setActiveGroup(g);
+          g = static_cast<int>(m_groups.size());  // break outer
+          break;
+        }
+      }
+    }
+  }
+
   // Blocked: changing the selection programmatically must not look like a user
-  // click (the panel no longer drives the mod list, but the itemSelectionChanged
-  // burst below would still cost time for no reason).
+  // click.
   const QSignalBlocker blocker(m_tree);
   m_tree->clearSelection();
   QTreeWidgetItem* first = nullptr;
-  for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
-    QTreeWidgetItem* group = m_tree->topLevelItem(g);
-    for (int e = 0; e < group->childCount(); ++e) {
-      QTreeWidgetItem* item = group->child(e);
-      if (!wanted.contains(item->data(0, kRoleEntityId).toString())) {
-        continue;
-      }
-      group->setExpanded(true);
-      item->setSelected(true);
-      if (first == nullptr) {
-        first = item;
-      }
+  for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+    QTreeWidgetItem* item = m_tree->topLevelItem(i);
+    if (!wanted.contains(item->data(0, kRoleEntityId).toString())) {
+      continue;
+    }
+    item->setSelected(true);
+    if (first == nullptr) {
+      first = item;
     }
   }
   if (first != nullptr) {
@@ -643,18 +695,14 @@ void EntityPanel::restoreEntitySelection(const QStringList& entityIds)
     return;
   }
   QTreeWidgetItem* firstItem = nullptr;
-  for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
-    QTreeWidgetItem* group = m_tree->topLevelItem(g);
-    for (int e = 0; e < group->childCount(); ++e) {
-      QTreeWidgetItem* item = group->child(e);
-      if (!entityIds.contains(item->data(0, kRoleEntityId).toString())) {
-        continue;
-      }
-      group->setExpanded(true);
-      item->setSelected(true);
-      if (firstItem == nullptr) {
-        firstItem = item;
-      }
+  for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+    QTreeWidgetItem* item = m_tree->topLevelItem(i);
+    if (!entityIds.contains(item->data(0, kRoleEntityId).toString())) {
+      continue;
+    }
+    item->setSelected(true);
+    if (firstItem == nullptr) {
+      firstItem = item;
     }
   }
   if (firstItem != nullptr) {
@@ -668,19 +716,11 @@ void EntityPanel::applyFilter(const QString& text)
     return;
   }
   const QString needle = text.trimmed();
-  for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
-    QTreeWidgetItem* group = m_tree->topLevelItem(g);
-    int visible = 0;
-    for (int e = 0; e < group->childCount(); ++e) {
-      QTreeWidgetItem* item = group->child(e);
-      const bool match = needle.isEmpty() ||
-                         item->text(0).contains(needle, Qt::CaseInsensitive) ||
-                         item->text(1).contains(needle, Qt::CaseInsensitive);
-      item->setHidden(!match);
-      if (match) {
-        ++visible;
-      }
-    }
-    group->setHidden(visible == 0 && !needle.isEmpty());
+  for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
+    QTreeWidgetItem* item = m_tree->topLevelItem(i);
+    const bool match = needle.isEmpty() ||
+                       item->text(0).contains(needle, Qt::CaseInsensitive) ||
+                       item->text(1).contains(needle, Qt::CaseInsensitive);
+    item->setHidden(!match);
   }
 }
