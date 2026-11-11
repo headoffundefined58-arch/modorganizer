@@ -113,6 +113,7 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QIODevice>
 #include <QIcon>
 #include <QInputDialog>
+#include <QAbstractItemModel>
 #include <QItemSelection>
 #include <QItemSelectionModel>
 #include <QJsonArray>
@@ -527,25 +528,56 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
       ui->tabWidget->setTabVisible(hiddenIndex, false);
     }
   } else {
-    // Bidirectional navigation: selecting a mod scrolls the panel to the
-    // entity it overrides; selecting an entity selects its mod.
-    entityPanel->setModActivatedHandler([this](const QString& modName) {
-      const int index = ModInfo::getIndex(modName);
-      if (index < 0) {
+    // Bidirectional navigation, multi-select aware: selecting mods scrolls
+    // the panel to their entities; selecting entities selects all their mods.
+    entityPanel->setModActivatedHandler([this](const QStringList& modNames) {
+      QItemSelectionModel* sel = ui->modList->selectionModel();
+      if (sel == nullptr || modNames.isEmpty()) {
         return;
       }
-      const QModelIndex mi = ui->modList->model()->index(index, 0);
-      if (mi.isValid()) {
-        ui->modList->setCurrentIndex(mi);
-        ui->modList->scrollTo(mi, QAbstractItemView::PositionAtCenter);
+      QAbstractItemModel* model  = ui->modList->model();
+      const int lastColumn       = model->columnCount() - 1;
+      QItemSelection selection;
+      int firstRow = -1;
+      for (const QString& modName : modNames) {
+        const int index = ModInfo::getIndex(modName);
+        if (index < 0) {
+          continue;
+        }
+        const QModelIndex top = model->index(index, 0);
+        if (!top.isValid()) {
+          continue;
+        }
+        const QModelIndex bottom = model->index(index, lastColumn);
+        selection.select(top, bottom.isValid() ? bottom : top);
+        if (firstRow < 0 || index < firstRow) {
+          firstRow = index;
+        }
       }
+      if (selection.isEmpty()) {
+        return;
+      }
+      sel->select(selection,
+                  QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+      const QModelIndex current = model->index(firstRow, 0);
+      sel->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
+      ui->modList->scrollTo(current, QAbstractItemView::PositionAtCenter);
     });
     if (QItemSelectionModel* selection = ui->modList->selectionModel()) {
-      connect(selection, &QItemSelectionModel::currentChanged, entityPanel,
-              [entityPanel](const QModelIndex& current, const QModelIndex&) {
-                if (current.isValid()) {
-                  entityPanel->focusEntityForMod(current.data().toString());
+      connect(selection, &QItemSelectionModel::selectionChanged, entityPanel,
+              [this, entityPanel](const QItemSelection&, const QItemSelection&) {
+                QItemSelectionModel* sel = ui->modList->selectionModel();
+                if (sel == nullptr) {
+                  return;
                 }
+                QStringList names;
+                for (const QModelIndex& row : sel->selectedRows()) {
+                  const QString name = row.data().toString();
+                  if (!name.isEmpty() && !names.contains(name)) {
+                    names.append(name);
+                  }
+                }
+                entityPanel->focusEntitiesForMods(names);
               });
     }
     connect(m_OrganizerCore.modList(), &ModList::modStatesChanged, entityPanel,

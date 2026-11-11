@@ -75,9 +75,12 @@ public:
   // Scroll to / select the first entity touched by `modName` (mod list -> panel).
   void focusEntityForMod(const QString& modName);
 
-  // Called when the user selects an entity, with the mod that owns it (may be
-  // empty for a pristine entry). Used to drive the mod list (panel -> mod list).
-  void setModActivatedHandler(std::function<void(const QString&)> handler);
+  // Multi-select variant: selects every entity touched by any of the mods.
+  void focusEntitiesForMods(const QStringList& modNames);
+
+  // Called with all mods owning the currently selected entities (pristine
+  // entries contribute nothing). Used to drive the mod list (panel -> mod list).
+  void setModActivatedHandler(std::function<void(const QStringList&)> handler);
 
 private:
   bool loadCatalog();
@@ -102,5 +105,8 @@ private:
   // mod-list -> panel scrolling)
   QHash<QString, QStringList> m_entityMods;
   QHash<QString, QString> m_modToEntity;
-  std::function<void(const QString&)> m_onModActivated;
+  std::function<void(const QStringList&)> m_onModActivated;
+
+  // Breaks the panel <-> mod list selection feedback loop.
+  bool m_selectionSync = false;
 };

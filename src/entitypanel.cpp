@@ -47,6 +47,39 @@ const int kRoleRank = Qt::UserRole + 1;
 const int kRoleMod = Qt::UserRole + 2;
 const int kRoleEntityId = Qt::UserRole + 3;
 
+// sortItems() also reorders top-level items. Sorting by status compared the
+// group headers' "0 / 109" against "16 / 359" as plain text, which pushed the
+// stage group above the ninja group. GroupItem ignores the sort column and
+// keeps the catalog's group order.
+const int kRoleGroupOrder = Qt::UserRole + 4;
+
+class GroupItem : public QTreeWidgetItem
+{
+public:
+  explicit GroupItem(QTreeWidget* parent, int order) : QTreeWidgetItem(parent)
+  {
+    setData(0, kRoleGroupOrder, order);
+  }
+
+  bool operator<(const QTreeWidgetItem& other) const override
+  {
+    const QVariant mine   = data(0, kRoleGroupOrder);
+    const QVariant theirs = other.data(0, kRoleGroupOrder);
+    if (mine.isValid() && theirs.isValid()) {
+      // QTreeWidget implements descending order by evaluating "other < this",
+      // which would flip the fixed group order whenever the user clicks a
+      // header twice. Compensate so both directions keep the catalog order.
+      QTreeWidget* tree = treeWidget();
+      const bool descending =
+          tree != nullptr && tree->header() != nullptr &&
+          tree->header()->sortIndicatorOrder() == Qt::DescendingOrder;
+      return descending ? mine.toInt() > theirs.toInt()
+                        : mine.toInt() < theirs.toInt();
+    }
+    return QTreeWidgetItem::operator<(other);
+  }
+};
+
 // Lets the status column sort by rank instead of by its localized text.
 class EntityItem : public QTreeWidgetItem
 {
@@ -80,7 +113,9 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   m_tree->setUniformRowHeights(true);
   m_tree->setRootIsDecorated(true);
   m_tree->setSortingEnabled(true);
-  m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
+  // Ctrl / Shift click and rubber-band selection: selecting several entities
+  // must be able to activate several mods at once.
+  m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
   m_tree->setSelectionBehavior(QAbstractItemView::SelectRows);
   root->addWidget(m_tree, 1);
 
@@ -156,7 +191,7 @@ EntityPanel::~EntityPanel()
   }
 }
 
-void EntityPanel::setModActivatedHandler(std::function<void(const QString&)> handler)
+void EntityPanel::setModActivatedHandler(std::function<void(const QStringList&)> handler)
 {
   m_onModActivated = std::move(handler);
 }
@@ -331,8 +366,9 @@ void EntityPanel::refresh()
   m_tree->setSortingEnabled(false);
   m_tree->clear();
 
+  int groupOrder = 0;
   for (const EntityGroup& group : m_groups) {
-    auto* groupItem = new QTreeWidgetItem(m_tree);
+    auto* groupItem = new GroupItem(m_tree, groupOrder++);
     groupItem->setText(0, group.name);
     QFont groupFont = groupItem->font(0);
     groupFont.setBold(true);
@@ -396,43 +432,77 @@ void EntityPanel::refresh()
 
 void EntityPanel::focusEntityForMod(const QString& modName)
 {
-  if (!m_available || modName.isEmpty()) {
-    return;
-  }
-  const QString entityId = m_modToEntity.value(modName);
-  if (entityId.isEmpty()) {
+  focusEntitiesForMods(QStringList{modName});
+}
+
+void EntityPanel::focusEntitiesForMods(const QStringList& modNames)
+{
+  if (!m_available || m_selectionSync || modNames.isEmpty()) {
     return;
   }
 
+  // m_modToEntity holds the first entity each mod contributes to, so one mod
+  // maps to one entity. De-duplicate so N selected mods select N entities.
+  QStringList wanted;
+  for (const QString& modName : modNames) {
+    const QString entityId = m_modToEntity.value(modName);
+    if (!entityId.isEmpty() && !wanted.contains(entityId)) {
+      wanted.append(entityId);
+    }
+  }
+  if (wanted.isEmpty()) {
+    return;
+  }
+
+  // Changing the tree selection emits itemSelectionChanged; the guard stops
+  // that from driving the mod list straight back into this function.
+  m_selectionSync = true;
+  m_tree->clearSelection();
+  QTreeWidgetItem* firstItem = nullptr;
   for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
     QTreeWidgetItem* group = m_tree->topLevelItem(g);
     for (int e = 0; e < group->childCount(); ++e) {
       QTreeWidgetItem* item = group->child(e);
-      if (item->data(0, kRoleEntityId).toString() != entityId) {
+      if (!wanted.contains(item->data(0, kRoleEntityId).toString())) {
         continue;
       }
       group->setExpanded(true);
       item->setHidden(false);
-      m_tree->setCurrentItem(item);
-      m_tree->scrollToItem(item, QAbstractItemView::PositionAtCenter);
-      return;
+      item->setSelected(true);
+      if (firstItem == nullptr) {
+        firstItem = item;
+      }
     }
   }
+  if (firstItem != nullptr) {
+    m_tree->setCurrentItem(firstItem);
+    m_tree->scrollToItem(firstItem, QAbstractItemView::PositionAtCenter);
+  }
+  m_selectionSync = false;
 }
 
 void EntityPanel::currentEntityChanged()
 {
-  if (!m_available || !m_onModActivated) {
+  if (!m_available || m_selectionSync || !m_onModActivated) {
     return;
   }
-  QTreeWidgetItem* item = m_tree->currentItem();
-  if (item == nullptr) {
+
+  // Gather every selected entity row (and expanded per-mod child rows), then
+  // hand the de-duplicated mod batch to the mod list.
+  QStringList mods;
+  for (QTreeWidgetItem* item : m_tree->selectedItems()) {
+    const QString mod = item->data(0, kRoleMod).toString();
+    if (!mod.isEmpty() && !mods.contains(mod)) {
+      mods.append(mod);
+    }
+  }
+  if (mods.isEmpty()) {
     return;
   }
-  const QString mod = item->data(0, kRoleMod).toString();
-  if (!mod.isEmpty()) {
-    m_onModActivated(mod);
-  }
+
+  m_selectionSync = true;
+  m_onModActivated(mods);
+  m_selectionSync = false;
 }
 
 void EntityPanel::applyFilter(const QString& text)
