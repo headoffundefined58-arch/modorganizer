@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <QSize>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
@@ -441,9 +442,16 @@ void EntityPanel::refresh()
         }
       }
       if (m_tree->columnCount() > 1) {
-        groupItem->setText(1, QString("%1 / %2")
+        // 忍者 / 舞台 are independent blocks, not ordinary rows: span the header
+        // across the columns, tint it and give it height so the two sections
+        // read as separate groups at a glance.
+        groupItem->setText(0, QString("%1   %2 / %3")
+                                  .arg(group.name)
                                   .arg(groupModified)
                                   .arg(group.entries.size()));
+        m_tree->setFirstItemColumnSpanned(groupItem, true);
+        groupItem->setBackground(0, QBrush(QColor(0xE8, 0xEE, 0xF7)));
+        groupItem->setSizeHint(0, QSize(0, 30));
       }
     }
 
