@@ -344,13 +344,6 @@ public:
   void hardlinkDeploy(const MappingType& mappings);
   void hardlinkPurge();
 
-  // MO2 core upgrade: materialize the virtual layer with hard links so the
-  // game sees mod files even when USVFS injection is unavailable. Links are
-  // tracked in a manifest and purged on game exit / MO2 start; vanilla files
-  // are never touched.
-  void hardlinkDeploy(const MappingType& mappings);
-  void hardlinkPurge();
-
   void updateVFSParams(MOBase::log::Levels logLevel, env::CoreDumpTypes coreDumpType,
                        const QString& coreDumpsPath, std::chrono::seconds spawnDelay,
                        QString executableBlacklist, const QStringList& skipFileSuffixes,
