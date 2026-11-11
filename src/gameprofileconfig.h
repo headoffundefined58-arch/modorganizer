@@ -171,18 +171,16 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
     config.layerRoot = gpExpandPath(layer, gameRoot, dataDir);
     // Defensive: a layer that does not exist makes USVFS drop every mapping for
     // the instance ("<layer> doesn't exist" in the usvfs log) and the game then
-    // runs completely unmodded with no visible error. Fall back to the loose
-    // roots this engine family actually uses.
+    // runs completely unmodded with no visible error. The only repair that is
+    // safe here is towards data_win32 - the loose root this engine family
+    // actually reads (data/ has LOWER priority than the CPKs, so mods landed
+    // there never apply). With CREATETARGET the mapping creates a missing
+    // data_win32 by itself, so a missing folder is not fatal any more.
     if (!QDir(config.layerRoot).exists()) {
-      const QStringList candidates{
-          QDir::toNativeSeparators(gameRoot.absoluteFilePath("data")),
-          QDir::toNativeSeparators(gameRoot.absoluteFilePath("data_win32")),
-          QDir::toNativeSeparators(dataDir.absolutePath())};
-      for (const QString& candidate : candidates) {
-        if (!candidate.isEmpty() && QDir(candidate).exists()) {
-          config.layerRoot = candidate;
-          break;
-        }
+      const QString candidate = QDir::toNativeSeparators(
+          gameRoot.absoluteFilePath("data_win32"));
+      if (QDir(candidate).exists()) {
+        config.layerRoot = candidate;
       }
     }
     config.inferNested =
