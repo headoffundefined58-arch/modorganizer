@@ -66,11 +66,13 @@ struct GameProfileConfig
   // engine reads loose files from <game>/data_win32 gets a mod stack that
   // behaves like a normal MO2 Data tree: same relative path = same file, so
   // priorities, conflicts and overwrite keep their usual meaning.
-  QString layerRoot;         // absolute; e.g. <game>/data_win32
+  QString layerRoot;         // absolute; the engine's loose root, e.g. <game>/data
+  QString gameRoot;          // absolute; <game>, for payload that must sit there
   QString routingPath;       // absolute; JSON {"<file name>": "<sub dir>"}
   bool inferNested = false;  // strip a single wrapper folder around the payload
   QHash<QString, QString> routing;  // lower-case file name -> sub dir ("" = root)
   QSet<QString> routingDirs;        // every sub dir the table can produce
+  QSet<QString> routingTopDirs;     // first segment of every dir above (spc, ui, ...)
 
   bool layered() const { return !layerRoot.isEmpty(); }
 
@@ -164,8 +166,25 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
   // ---- virtual overlay layer ----
   const QString layer =
       ini.value("VFSContentLayout/layer").toString().trimmed();
+  config.gameRoot = QDir::toNativeSeparators(gameRoot.absolutePath());
   if (!layer.isEmpty()) {
     config.layerRoot = gpExpandPath(layer, gameRoot, dataDir);
+    // Defensive: a layer that does not exist makes USVFS drop every mapping for
+    // the instance ("<layer> doesn't exist" in the usvfs log) and the game then
+    // runs completely unmodded with no visible error. Fall back to the loose
+    // roots this engine family actually uses.
+    if (!QDir(config.layerRoot).exists()) {
+      const QStringList candidates{
+          QDir::toNativeSeparators(gameRoot.absoluteFilePath("data")),
+          QDir::toNativeSeparators(gameRoot.absoluteFilePath("data_win32")),
+          QDir::toNativeSeparators(dataDir.absolutePath())};
+      for (const QString& candidate : candidates) {
+        if (!candidate.isEmpty() && QDir(candidate).exists()) {
+          config.layerRoot = candidate;
+          break;
+        }
+      }
+    }
     config.inferNested =
         ini.value("VFSContentLayout/infer_nested", true).toBool();
 
@@ -187,6 +206,11 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
             const QString dir = it.value().toString();
             config.routing.insert(it.key().toLower(), dir);
             config.routingDirs.insert(dir);
+            if (!dir.isEmpty()) {
+              // "ui/flash/OTHER/name_tlp/chi" -> "ui": a mod that keeps its
+              // payload under ui/ or message/ is already layer-relative.
+              config.routingTopDirs.insert(dir.section('/', 0, 0));
+            }
           }
         }
       }
@@ -333,6 +357,18 @@ inline QStringList gpPayloadFiles(const QDir& dir)
   return result;
 }
 
+// Loader payload that must sit next to the executable, never under the loose
+// data root: a mod whose only content is "dinput8.dll" or an "*.ini" would
+// otherwise be projected into <layer>/spc and do nothing. The routing table has
+// no entry for these, and their extension is unambiguous, so it is safe to use
+// the game root for them.
+inline bool gpIsRootPayload(const QString& fileName)
+{
+  static const QSet<QString> kSuffixes{
+      "dll", "exe", "asi", "ini", "bat", "cmd", "lnk"};
+  return kSuffixes.contains(QFileInfo(fileName).suffix().toLower());
+}
+
 // Project a directory that holds loose payload (no data_win32/ or Root/ inside).
 // Each file is routed by name through the CPK-derived table, which is what lets
 // an unzipped community package land exactly where the engine reads it.
@@ -340,8 +376,23 @@ inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
                            QVector<GameProfileMapping>& out)
 {
   const QString legacy      = gpLayerLegacySubdir(config);
-  const QStringList files   = gpPayloadFiles(dir);
+  const QStringList allFiles = gpPayloadFiles(dir);
   const QStringList subdirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+
+  // Split loader payload (dll/exe/ini ...) away from asset payload: it belongs
+  // in the game root, and it must not make the whole directory look "mixed".
+  QStringList files;
+  int rootPayload = 0;
+  for (const QString& name : allFiles) {
+    if (!config.gameRoot.isEmpty() && gpIsRootPayload(name) &&
+        config.routing.value(name.toLower()).isEmpty()) {
+      out.append({QDir::toNativeSeparators(dir.filePath(name)),
+                  QDir::toNativeSeparators(config.gameRoot + "/" + name), false});
+      ++rootPayload;
+    } else {
+      files.append(name);
+    }
+  }
 
   QMap<QString, QStringList> byCategory;
   for (const QString& name : files) {
@@ -354,12 +405,13 @@ inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
 
   bool subdirNeedsRouting = false;
   for (const QString& sub : subdirs) {
-    if (config.routingDirs.contains(sub)) {
+    if (config.routingTopDirs.contains(sub) || config.routingDirs.contains(sub)) {
       subdirNeedsRouting = true;
     }
   }
 
-  if (byCategory.size() <= 1 && !subdirNeedsRouting && files.size() <= 4096) {
+  if (byCategory.size() <= 1 && !subdirNeedsRouting && files.size() <= 4096 &&
+      rootPayload == 0) {
     // One mapping for the whole directory. Cheap, and the resulting relative
     // paths are identical to a "data_win32/..." mod, so MO2 shows the conflict.
     const QString category =
@@ -377,7 +429,7 @@ inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
   }
 
   for (const QString& sub : subdirs) {
-    if (config.routingDirs.contains(sub)) {
+    if (config.routingTopDirs.contains(sub) || config.routingDirs.contains(sub)) {
       // The folder already names a real category (sound/, ui/, effect/ ...):
       // keep its structure.
       out.append({QDir::toNativeSeparators(dir.filePath(sub)),
@@ -438,9 +490,14 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
       if (root.exists("data_win32")) {
         out.append({QDir::toNativeSeparators(root.filePath("data_win32")),
                     gpLayerPath(config, QString()), true});
-      } else {
-        out.append({QDir::toNativeSeparators(root.absolutePath()),
+      } else if (root.exists("data")) {
+        out.append({QDir::toNativeSeparators(root.filePath("data")),
                     gpLayerPath(config, QString()), true});
+      } else {
+        // Root/ that is not a data tree is loader payload (dll/exe/ini): Root
+        // Builder's whole purpose, done by the core instead of by copying.
+        out.append({QDir::toNativeSeparators(root.absolutePath()),
+                    QDir::toNativeSeparators(config.gameRoot), true});
       }
       return true;
     }
@@ -460,7 +517,7 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
   // be mistaken for a wrapper folder and re-routed file by file.
   bool hasCategoryDir = false;
   for (const QString& d : dirs) {
-    if (config.routingDirs.contains(d)) {
+    if (config.routingTopDirs.contains(d) || config.routingDirs.contains(d)) {
       hasCategoryDir = true;
       break;
     }
@@ -468,13 +525,21 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
   if (hasCategoryDir) {
     const QString legacy = gpLayerLegacySubdir(config);
     for (const QString& d : dirs) {
-      const QString destSub = config.routingDirs.contains(d)
-                                  ? d
-                                  : (legacy.isEmpty() ? d : legacy + "/" + d);
+      const bool isCategory =
+          config.routingTopDirs.contains(d) || config.routingDirs.contains(d);
+      const QString destSub =
+          isCategory ? d : (legacy.isEmpty() ? d : legacy + "/" + d);
       out.append({QDir::toNativeSeparators(dir.filePath(d)),
                   gpLayerPath(config, destSub), true});
     }
     for (const QString& name : files) {
+      if (!config.gameRoot.isEmpty() && gpIsRootPayload(name) &&
+          config.routing.value(name.toLower()).isEmpty()) {
+        out.append({QDir::toNativeSeparators(dir.filePath(name)),
+                    QDir::toNativeSeparators(config.gameRoot + "/" + name),
+                    false});
+        continue;
+      }
       QString category = config.routing.value(name.toLower());
       if (category.isEmpty()) {
         category = legacy;
