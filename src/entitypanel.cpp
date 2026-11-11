@@ -1,5 +1,7 @@
 #include "entitypanel.h"
 
+#include <algorithm>
+
 #include "gameprofileconfig.h"
 #include "organizercore.h"
 #include "profile.h"
@@ -38,11 +40,12 @@ struct ModFiles
 
 const int kMaxFilesPerMod = 20000;
 
+const int kMaxFilesPerMod = 20000;
+
 // Recursion cap for the "selection changed" call chain. Two views driving each
 // other's selection is a legitimate one-hop round trip; anything deeper means a
 // signal loop is bouncing, and unbounded recursion here terminates the process
 // with a stack overflow instead of an error message.
-const int kMaxSyncDepth = 4;
 
 // Rank stored in Qt::UserRole of the status column: 0 = several mods,
 // 1 = one mod, 2 = pristine. Sorting by that column therefore puts the
@@ -149,8 +152,6 @@ EntityPanel::EntityPanel(OrganizerCore* core, QWidget* parent)
   connect(m_refreshButton, &QPushButton::clicked, this, [this]() { refresh(); });
   connect(m_filter, &QLineEdit::textChanged, this,
           [this](const QString& text) { applyFilter(text); });
-  connect(m_tree, &QTreeWidget::itemSelectionChanged, this,
-          [this]() { currentEntityChanged(); });
   connect(m_tree, &QTreeWidget::itemExpanded, this,
           [this](QTreeWidgetItem* item) { populateChildren(item); });
 
@@ -195,17 +196,6 @@ EntityPanel::~EntityPanel()
   if (m_debounce != nullptr) {
     m_debounce->stop();
   }
-}
-
-void EntityPanel::setModActivatedHandler(std::function<void(const QStringList&)> handler)
-{
-  m_onModActivated = std::move(handler);
-}
-
-QString EntityPanel::label(const QString& key, const QString& fallback) const
-{
-  const QString value = m_labels.value(key).toString();
-  return value.isEmpty() ? fallback : value;
 }
 
 bool EntityPanel::loadCatalog()
@@ -261,6 +251,29 @@ bool EntityPanel::loadCatalog()
       if (entry.patterns.isEmpty()) {
         entry.patterns.append(entry.id + "*");
       }
+      for (const QString& pattern : entry.patterns) {
+        QRegularExpression re(QRegularExpression::wildcardToRegularExpression(pattern));
+        re.setPatternOptions(QRegularExpression::CaseInsensitiveOption);
+        entry.regexes.append(re);
+      }
+      // Bucket key: the literal head of the first pattern. "5tyvbod1*" -> "5ty";
+      // a pattern that starts with a wildcard gets no key and is always tested.
+      entry.matchKey.clear();
+      for (const QString& pattern : entry.patterns) {
+        QString literal;
+        for (const QChar c : pattern) {
+          if (c == QLatin1Char('*') || c == QLatin1Char('?') ||
+              c == QLatin1Char('[')) {
+            break;
+          }
+          literal.append(c);
+        }
+        if (literal.size() >= 3) {
+          entry.matchKey = literal.left(3).toLower();
+          break;
+        }
+      }
+
       if (!entry.id.isEmpty() && !entry.name.isEmpty()) {
         group.entries.append(entry);
       }
@@ -269,7 +282,41 @@ bool EntityPanel::loadCatalog()
       m_groups.append(group);
     }
   }
-  return !m_groups.isEmpty();
+  if (m_groups.isEmpty()) {
+    return false;
+  }
+  buildMatchIndex();
+  return true;
+}
+
+void EntityPanel::buildMatchIndex()
+{
+  m_flat.clear();
+  m_matchIndex.clear();
+  m_matchAll.clear();
+
+  int flat = 0;
+  for (int g = 0; g < m_groups.size(); ++g) {
+    const EntityGroup& group = m_groups.at(g);
+    for (int e = 0; e < group.entries.size(); ++e, ++flat) {
+      m_flat.append(qMakePair(g, e));
+      const EntityEntry& entry = group.entries.at(e);
+      if (entry.matchKey.isEmpty()) {
+        m_matchAll.append(flat);
+      } else {
+        m_matchIndex[entry.matchKey].append(flat);
+      }
+    }
+  }
+}
+
+void EntityPanel::showEvent(QShowEvent* event)
+{
+  QWidget::showEvent(event);
+  if (m_dirty) {
+    m_dirty = false;
+    refresh();
+  }
 }
 
 void EntityPanel::scheduleRefresh()
@@ -282,7 +329,17 @@ void EntityPanel::scheduleRefresh()
 void EntityPanel::refresh()
 {
   OrganizerCore* core = qobject_cast<OrganizerCore*>(m_core.data());
-  if (!m_available || core == nullptr || m_refreshing) {
+  if (!m_available || core == nullptr) {
+    return;
+  }
+  if (!isVisible()) {
+    // After the game exits MO2 refreshes the whole directory structure and the
+    // panel is not even on screen; rebuilding it then is pure waste. Rebuild
+    // once when the tab is actually shown (showEvent).
+    m_dirty = true;
+    return;
+  }
+  if (m_refreshing) {
     // m_refreshing: a mod state change can schedule a refresh while one is
     // still running (the mod list emits once per toggled mod). Rebuilding the
     // tree from inside a rebuild would delete items that are still being
@@ -327,47 +384,66 @@ void EntityPanel::refresh()
     perMod.append(entry);
   }
 
+  // One pass over the files, not one pass per entity. The previous version ran
+  // QDir::match() for every (entity, file) pair, and QDir::match compiles a
+  // wildcard regex on each call: 468 entities x ~1000 files meant roughly half
+  // a million regex compilations per rebuild. That is what made the window
+  // freeze for seconds after the game exited (MO2 refreshes the whole tree
+  // then). Now the patterns are compiled once at load time and a file is only
+  // tested against the entities sharing its first three characters.
+  QVector<QHash<int, int>> counts(m_flat.size());
+  QVector<QHash<int, QStringList>> samples(m_flat.size());
+
+  for (int mi = 0; mi < perMod.size(); ++mi) {
+    const ModFiles& mod = perMod.at(mi);
+    for (const QString& fileName : mod.files) {
+      const QString key = fileName.left(3).toLower();
+
+      auto test = [&](int flat) {
+        const QPair<int, int>& ref = m_flat.at(flat);
+        const EntityEntry& entity = m_groups.at(ref.first).entries.at(ref.second);
+        for (const QRegularExpression& re : entity.regexes) {
+          if (re.match(fileName).hasMatch()) {
+            ++counts[flat][mi];
+            QStringList& list = samples[flat][mi];
+            if (list.size() < 3) {
+              list.append(fileName);
+            }
+            return;
+          }
+        }
+      };
+
+      for (const int flat : m_matchAll) {
+        test(flat);
+      }
+      const auto bucket = m_matchIndex.constFind(key);
+      if (bucket != m_matchIndex.constEnd()) {
+        for (const int flat : bucket.value()) {
+          test(flat);
+        }
+      }
+    }
+  }
+
   QHash<QString, QVector<EntityModHit>> hits;
   m_entityHits.clear();
-  m_entityMods.clear();
-  m_modToEntity.clear();
+  int flat = 0;
   for (const EntityGroup& group : m_groups) {
     for (const EntityEntry& entity : group.entries) {
       QVector<EntityModHit> contributions;
-      for (const ModFiles& mod : perMod) {
-        int count = 0;
-        QStringList samples;
-        for (const QString& fileName : mod.files) {
-          bool matched = false;
-          for (const QString& pattern : entity.patterns) {
-            if (QDir::match(pattern, fileName)) {
-              matched = true;
-              break;
-            }
-          }
-          if (matched) {
-            ++count;
-            if (samples.size() < 3) {
-              samples.append(fileName);
-            }
-          }
-        }
-        if (count > 0) {
-          contributions.append(EntityModHit{mod.name, count, samples});
-        }
+      QList<int> modIndexes = counts.at(flat).keys();
+      std::sort(modIndexes.begin(), modIndexes.end());  // stable child order
+      for (const int mi : modIndexes) {
+        contributions.append(EntityModHit{perMod.at(mi).name,
+                                          counts.at(flat).value(mi),
+                                          samples.at(flat).value(mi)});
       }
       if (!contributions.isEmpty()) {
         hits.insert(entity.id, contributions);
         m_entityHits.insert(entity.id, contributions);
-        QStringList names;
-        for (const EntityModHit& hit : contributions) {
-          names.append(hit.modName);
-          if (!m_modToEntity.contains(hit.modName)) {
-            m_modToEntity.insert(hit.modName, entity.id);
-          }
-        }
-        m_entityMods.insert(entity.id, names);
       }
+      ++flat;
     }
   }
 
@@ -463,81 +539,6 @@ void EntityPanel::refresh()
   m_refreshing = false;
 }
 
-void EntityPanel::focusEntityForMod(const QString& modName)
-{
-  focusEntitiesForMods(QStringList{modName});
-}
-
-void EntityPanel::focusEntitiesForMods(const QStringList& modNames)
-{
-  if (!m_available || m_refreshing || m_selectionSync || modNames.isEmpty()) {
-    return;
-  }
-  if (m_syncDepth > kMaxSyncDepth) {
-    // Safety net: a pathological ping-pong must never eat the whole stack,
-    // which is how this used to crash the process instead of just misbehaving.
-    return;
-  }
-
-  // m_modToEntity holds the first entity each mod contributes to, so one mod
-  // maps to one entity. De-duplicate so N selected mods select N entities.
-  QStringList wanted;
-  for (const QString& modName : modNames) {
-    const QString entityId = m_modToEntity.value(modName);
-    if (!entityId.isEmpty() && !wanted.contains(entityId)) {
-      wanted.append(entityId);
-    }
-  }
-  if (wanted.isEmpty()) {
-    return;
-  }
-  wanted.sort();
-
-  QStringList have = selectedEntityIds();
-  have.sort();
-
-  m_selectionSync = true;
-  ++m_syncDepth;
-  {
-    // Programmatic selection must not look like a user click: blocking the
-    // tree keeps itemSelectionChanged from re-entering the mod list.
-    const QSignalBlocker blockTree(m_tree);
-
-    QTreeWidgetItem* firstItem = nullptr;
-    if (have != wanted) {
-      m_tree->clearSelection();
-      for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
-        QTreeWidgetItem* group = m_tree->topLevelItem(g);
-        for (int e = 0; e < group->childCount(); ++e) {
-          QTreeWidgetItem* item = group->child(e);
-          if (!wanted.contains(item->data(0, kRoleEntityId).toString())) {
-            continue;
-          }
-          group->setExpanded(true);
-          item->setHidden(false);
-          item->setSelected(true);
-          if (firstItem == nullptr) {
-            firstItem = item;
-          }
-        }
-      }
-    }
-    if (firstItem == nullptr) {
-      // Selection already matched; still scroll so re-clicking a mod works.
-      firstItem = findEntityItem(wanted.first());
-    }
-    if (firstItem != nullptr) {
-      if (firstItem->isHidden()) {
-        firstItem->setHidden(false);
-      }
-      m_tree->setCurrentItem(firstItem);
-      m_tree->scrollToItem(firstItem, QAbstractItemView::PositionAtCenter);
-    }
-  }
-  --m_syncDepth;
-  m_selectionSync = false;
-}
-
 void EntityPanel::populateChildren(QTreeWidgetItem* item)
 {
   if (item == nullptr || item->childCount() > 0) {
@@ -579,23 +580,6 @@ QStringList EntityPanel::selectedEntityIds() const
   return ids;
 }
 
-QTreeWidgetItem* EntityPanel::findEntityItem(const QString& entityId) const
-{
-  if (m_tree == nullptr || entityId.isEmpty()) {
-    return nullptr;
-  }
-  for (int g = 0; g < m_tree->topLevelItemCount(); ++g) {
-    QTreeWidgetItem* group = m_tree->topLevelItem(g);
-    for (int e = 0; e < group->childCount(); ++e) {
-      QTreeWidgetItem* item = group->child(e);
-      if (item->data(0, kRoleEntityId).toString() == entityId) {
-        return item;
-      }
-    }
-  }
-  return nullptr;
-}
-
 void EntityPanel::restoreEntitySelection(const QStringList& entityIds)
 {
   if (m_tree == nullptr || entityIds.isEmpty()) {
@@ -619,35 +603,6 @@ void EntityPanel::restoreEntitySelection(const QStringList& entityIds)
   if (firstItem != nullptr) {
     m_tree->setCurrentItem(firstItem);
   }
-}
-
-void EntityPanel::currentEntityChanged()
-{
-  if (!m_available || m_refreshing || m_selectionSync || !m_onModActivated) {
-    return;
-  }
-  if (m_syncDepth > kMaxSyncDepth) {
-    return;
-  }
-
-  // Gather every selected entity row (and expanded per-mod child rows), then
-  // hand the de-duplicated mod batch to the mod list.
-  QStringList mods;
-  for (QTreeWidgetItem* item : m_tree->selectedItems()) {
-    const QString mod = item->data(0, kRoleMod).toString();
-    if (!mod.isEmpty() && !mods.contains(mod)) {
-      mods.append(mod);
-    }
-  }
-  if (mods.isEmpty()) {
-    return;
-  }
-
-  m_selectionSync = true;
-  ++m_syncDepth;
-  m_onModActivated(mods);
-  --m_syncDepth;
-  m_selectionSync = false;
 }
 
 void EntityPanel::applyFilter(const QString& text)

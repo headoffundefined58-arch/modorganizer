@@ -116,7 +116,6 @@ along with Mod Organizer.  If not, see <http://www.gnu.org/licenses/>.
 #include <QAbstractItemModel>
 #include <QItemSelection>
 #include <QItemSelectionModel>
-#include <QAbstractProxyModel>
 #include <QVector>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -234,54 +233,6 @@ void setFilterShortcuts(QWidget* widget, QLineEdit* edit)
   hookActivate(edit);
   hookReset(edit);
 }
-
-namespace
-{
-// The mod list is shown through a chain of proxies (ModListSortProxy on top of
-// a grouping proxy on top of ModList). ModInfo::getIndex() returns a row of the
-// *source* model, so it must be mapped down the chain before it can be used to
-// select a row in the view; feeding a source row straight to the view model
-// selected the wrong mod and kept re-triggering the panel round-trip.
-QModelIndex mapSourceToView(QAbstractItemModel* viewModel,
-                            QAbstractItemModel* source,
-                            const QModelIndex& sourceIndex)
-{
-  if (viewModel == nullptr || source == nullptr || !sourceIndex.isValid()) {
-    return {};
-  }
-  if (viewModel == source) {
-    return sourceIndex;
-  }
-
-  // QAbstractProxyModel, not QSortFilterProxyModel: MO2's group-by proxies
-  // (ModListByPriorityProxy, ...) derive from QAbstractProxyModel directly, and
-  // the panel -> mod list hop has to keep working with grouping enabled.
-  QVector<QAbstractProxyModel*> chain;
-  QAbstractItemModel* model = viewModel;
-  while (auto* proxy = qobject_cast<QAbstractProxyModel*>(model)) {
-    chain.append(proxy);
-    model = proxy->sourceModel();
-    if (model == nullptr) {
-      return {};
-    }
-    if (model == source) {
-      break;
-    }
-  }
-  if (model != source) {
-    return {};
-  }
-
-  QModelIndex index = sourceIndex;
-  for (int i = chain.size() - 1; i >= 0; --i) {
-    index = chain.at(i)->mapFromSource(index);
-    if (!index.isValid()) {
-      return {};
-    }
-  }
-  return index;
-}
-}  // namespace
 
 MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
                        PluginContainer& pluginContainer, QWidget* parent)
@@ -578,55 +529,6 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
       ui->tabWidget->setTabVisible(hiddenIndex, false);
     }
   } else {
-    // Bidirectional navigation, multi-select aware: selecting mods scrolls the
-    // panel to their entities; selecting entities selects all their mods.
-    // Both hops are queued and tagged instead of being applied inline: mutating
-    // one selection model from inside the other one's signal handler recursed
-    // panel -> mod list -> panel until the stack overflowed, which is exactly
-    // what happened when two enabled mods touched the same entity.
-    entityPanel->setModActivatedHandler([this](const QStringList& modNames) {
-      m_pendingEntityMods = modNames;
-      if (m_entitySelectionQueued) {
-        return;
-      }
-      m_entitySelectionQueued = true;
-      QTimer::singleShot(0, this, [this]() {
-        m_entitySelectionQueued = false;
-        const QStringList mods = m_pendingEntityMods;
-        m_pendingEntityMods.clear();
-        applyEntityModSelection(mods);
-      });
-    });
-    if (QItemSelectionModel* selection = ui->modList->selectionModel()) {
-      connect(selection, &QItemSelectionModel::selectionChanged, entityPanel,
-              [this, entityPanel](const QItemSelection&, const QItemSelection&) {
-                if (m_syncingModSelection) {
-                  return;
-                }
-                QItemSelectionModel* sel = ui->modList->selectionModel();
-                if (sel == nullptr) {
-                  return;
-                }
-                QStringList names;
-                for (const QModelIndex& row : sel->selectedRows()) {
-                  const QString name = row.data().toString();
-                  if (!name.isEmpty() && !names.contains(name)) {
-                    names.append(name);
-                  }
-                }
-                m_pendingFocusMods = names;
-                if (m_focusQueued) {
-                  return;
-                }
-                m_focusQueued = true;
-                QTimer::singleShot(0, entityPanel, [this, entityPanel]() {
-                  m_focusQueued = false;
-                  const QStringList mods = m_pendingFocusMods;
-                  m_pendingFocusMods.clear();
-                  entityPanel->focusEntitiesForMods(mods);
-                });
-              });
-    }
     connect(m_OrganizerCore.modList(), &ModList::modStatesChanged, entityPanel,
             [entityPanel](const QModelIndexList&) {
               entityPanel->scheduleRefresh();
@@ -666,53 +568,6 @@ MainWindow::MainWindow(Settings& settings, OrganizerCore& organizerCore,
   ui->modList->updateModCount();
   ui->espList->updatePluginCount();
   ui->statusBar->updateNormalMessage(m_OrganizerCore);
-}
-
-void MainWindow::applyEntityModSelection(const QStringList& modNames)
-{
-  QItemSelectionModel* selection = ui->modList->selectionModel();
-  QAbstractItemModel* viewModel  = ui->modList->model();
-  if (selection == nullptr || viewModel == nullptr || modNames.isEmpty()) {
-    return;
-  }
-  if (m_syncingModSelection) {
-    return;
-  }
-
-  QAbstractItemModel* source = m_OrganizerCore.modList();
-  const int lastColumn       = qMax(viewModel->columnCount() - 1, 0);
-  QItemSelection rows;
-  int firstRow = -1;
-  for (const QString& modName : modNames) {
-    const int index = ModInfo::getIndex(modName);
-    if (index < 0 || source == nullptr) {
-      continue;
-    }
-    const QModelIndex top =
-        mapSourceToView(viewModel, source, source->index(index, 0));
-    if (!top.isValid()) {
-      // Filtered out of the current view: select nothing rather than whichever
-      // row happens to occupy that position.
-      continue;
-    }
-    const QModelIndex bottom = viewModel->index(top.row(), lastColumn, top.parent());
-    rows.select(top, bottom.isValid() ? bottom : top);
-    if (firstRow < 0 || top.row() < firstRow) {
-      firstRow = top.row();
-    }
-  }
-  if (rows.isEmpty() || firstRow < 0) {
-    return;
-  }
-
-  m_syncingModSelection = true;
-  selection->select(rows, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-  const QModelIndex current = viewModel->index(firstRow, 0);
-  if (current.isValid()) {
-    selection->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
-    ui->modList->scrollTo(current, QAbstractItemView::PositionAtCenter);
-  }
-  m_syncingModSelection = false;
 }
 
 void MainWindow::setupModList()

@@ -24,16 +24,17 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QPair>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 #include <QWidget>
 
-#include <functional>
-
 class QLineEdit;
 class QPushButton;
+class QShowEvent;
 class QTimer;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -51,6 +52,15 @@ struct EntityEntry
   QString id;
   QString name;
   QStringList patterns;
+
+  // Wildcard patterns compiled once at load time. QDir::match() recompiles a
+  // regular expression on every call, and the naive loop called it once per
+  // (entity, file) pair - ~500k compilations per rebuild, seconds of frozen UI
+  // every time a mod state changed or the game exited.
+  QVector<QRegularExpression> regexes;
+  // First three literal characters of the pattern (lower case), used as a
+  // bucket key so a file is only tested against plausible entities.
+  QString matchKey;
 };
 
 struct EntityGroup
@@ -73,30 +83,22 @@ public:
   void refresh();
   void scheduleRefresh();
 
-  // Scroll to / select the first entity touched by `modName` (mod list -> panel).
-  void focusEntityForMod(const QString& modName);
-
-  // Multi-select variant: selects every entity touched by any of the mods.
-  void focusEntitiesForMods(const QStringList& modNames);
-
-  // Called with all mods owning the currently selected entities (pristine
-  // entries contribute nothing). Used to drive the mod list (panel -> mod list).
-  void setModActivatedHandler(std::function<void(const QStringList&)> handler);
+protected:
+  void showEvent(QShowEvent* event) override;
 
 private:
   bool loadCatalog();
+  void buildMatchIndex();
   void applyFilter(const QString& text);
   QString label(const QString& key, const QString& fallback) const;
-  void currentEntityChanged();
 
   // Entity ids of the currently selected rows (child rows map to their parent).
   QStringList selectedEntityIds() const;
-  QTreeWidgetItem* findEntityItem(const QString& entityId) const;
   void restoreEntitySelection(const QStringList& entityIds);
 
   // Rows for "which mods touch this entity" are created only when the branch is
   // expanded: one ninja edited by ten mods used to add ten child rows during
-  // every rebuild, which is what made the panel crawl and sometimes crash.
+  // every rebuild, which made the panel crawl and sometimes crash.
   void populateChildren(QTreeWidgetItem* item);
 
   // QPointer: an instance switch rebuilds OrganizerCore, which nulls this out
@@ -112,24 +114,20 @@ private:
   QStringList m_columns;
   QVector<EntityGroup> m_groups;
 
-  // entity id -> mods currently overriding it; entity id -> first mod (for
-  // mod-list -> panel scrolling)
-  QHash<QString, QStringList> m_entityMods;
-  QHash<QString, QString> m_modToEntity;
-  std::function<void(const QStringList&)> m_onModActivated;
+  // Flattened (group, entry) positions in catalog order. m_matchIndex buckets
+  // them by the pattern's first three characters; m_matchAll holds the ones
+  // without a usable literal prefix (patterns starting with a wildcard), which
+  // have to be tested for every file.
+  QVector<QPair<int, int>> m_flat;
+  QHash<QString, QVector<int>> m_matchIndex;
+  QVector<int> m_matchAll;
 
   // entity id -> contributing mods, kept so children can be built lazily
   QHash<QString, QVector<EntityModHit>> m_entityHits;
-  // fingerprint of the last rebuild input, to skip no-op refreshes
-  QString m_lastFingerprint;
 
-  // Breaks the panel <-> mod list selection feedback loop.
-  bool m_selectionSync = false;
-
-  // True while refresh() rebuilds the tree: item pointers are invalid then, so
-  // both selection callbacks must stay out of the way.
+  // True while refresh() rebuilds the tree: item pointers are invalid then.
   bool m_refreshing = false;
 
-  // Depth of the panel <-> mod list call chain, used as a hard recursion cap.
-  int m_syncDepth = 0;
+  // A rebuild requested while the tab was hidden is deferred until it is shown.
+  bool m_dirty = false;
 };
