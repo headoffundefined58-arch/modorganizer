@@ -453,6 +453,38 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
 
   const QStringList files = gpPayloadFiles(dir);
   const QStringList dirs  = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+
+  // A mod that already splits its payload into real categories (spc/, sound/,
+  // ui/, effect/ ...) is layer-relative by construction. Map those folders as
+  // they are, without applying the wrapper heuristic - otherwise "spc/" would
+  // be mistaken for a wrapper folder and re-routed file by file.
+  bool hasCategoryDir = false;
+  for (const QString& d : dirs) {
+    if (config.routingDirs.contains(d)) {
+      hasCategoryDir = true;
+      break;
+    }
+  }
+  if (hasCategoryDir) {
+    const QString legacy = gpLayerLegacySubdir(config);
+    for (const QString& d : dirs) {
+      const QString destSub = config.routingDirs.contains(d)
+                                  ? d
+                                  : (legacy.isEmpty() ? d : legacy + "/" + d);
+      out.append({QDir::toNativeSeparators(dir.filePath(d)),
+                  gpLayerPath(config, destSub), true});
+    }
+    for (const QString& name : files) {
+      QString category = config.routing.value(name.toLower());
+      if (category.isEmpty()) {
+        category = legacy;
+      }
+      out.append({QDir::toNativeSeparators(dir.filePath(name)),
+                  gpLayerPath(config, category, name), false});
+    }
+    return out;
+  }
+
   if (config.inferNested && files.isEmpty() && dirs.size() == 1) {
     const QDir wrapper(dir.filePath(dirs.first()));
     if (tryLayout(wrapper)) {
