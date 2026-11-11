@@ -32,6 +32,8 @@
 #include "gameprofileconfig.h"
 #include "nxbinstancedefaults.h"
 #include "vfscoreconfig.h"
+
+#include <windows.h>
 #include <dataarchives.h>
 #include <ipluginmodpage.h>
 #include <localsavegames.h>
@@ -482,8 +484,172 @@ void OrganizerCore::createDefaultProfile()
   }
 }
 
+namespace
+{
+// The manifest lists every hard link the deploy created. Purging removes only
+// manifest entries, so a vanilla or user file inside the layer can never be
+// deleted by accident.
+QString nxbDeployManifestPath()
+{
+  const QString iniPath = gameProfileIniPath();
+  if (iniPath.isEmpty()) {
+    return {};
+  }
+  return QFileInfo(iniPath).absolutePath() + "/nxb_deploy_manifest.txt";
+}
+}  // namespace
+
+void OrganizerCore::hardlinkPurge()
+{
+  const auto* game = qApp->property("managed_game").value<IPluginGame*>();
+  if (game == nullptr) {
+    return;
+  }
+  const QDir gameRoot(game->gameDirectory().absolutePath());
+  const QDir dataDir(game->dataDirectory().absolutePath());
+  const GameProfileConfig gp = gameProfileSnapshot(gameRoot, dataDir);
+  if (!gp.layered()) {
+    return;
+  }
+
+  const QString manifestPath = nxbDeployManifestPath();
+  QFile manifestFile(manifestPath);
+  if (!manifestFile.exists()) {
+    return;
+  }
+  if (!manifestFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    return;
+  }
+  const QStringList lines =
+      QString::fromUtf8(manifestFile.readAll())
+          .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+
+  int removed = 0;
+  for (const QString& entry : lines) {
+    const QString dest = entry.trimmed();
+    if (!dest.isEmpty() && QFile::exists(dest) && QFile::remove(dest)) {
+      ++removed;
+    }
+  }
+  manifestFile.close();
+  manifestFile.remove();
+
+  // Drop the directory skeleton we created, deepest first; only empty
+  // directories are removed, and never the layer root itself.
+  const QString layer = QDir::cleanPath(gp.layerRoot);
+  QStringList dirs;
+  QDirIterator it(layer, QDir::Dirs | QDir::NoDotAndDotDot,
+                  QDirIterator::Subdirectories);
+  while (it.hasNext()) {
+    dirs.append(it.next());
+  }
+  std::sort(dirs.begin(), dirs.end(),
+            [](const QString& a, const QString& b) { return a.size() > b.size(); });
+  int rmdir = 0;
+  for (const QString& dir : dirs) {
+    QDir d(dir);
+    if (d.isEmpty() && d.absolutePath() != layer) {
+      if (QDir().rmdir(d.absolutePath())) {
+        ++rmdir;
+      }
+    }
+  }
+  log::info("hardlink purge: removed {} links and {} empty directories", removed,
+            rmdir);
+}
+
+void OrganizerCore::hardlinkDeploy(const MappingType& mappings)
+{
+  const auto* game = qApp->property("managed_game").value<IPluginGame*>();
+  if (game == nullptr) {
+    return;
+  }
+  const QDir gameRoot(game->gameDirectory().absolutePath());
+  const QDir dataDir(game->dataDirectory().absolutePath());
+  const GameProfileConfig gp = gameProfileSnapshot(gameRoot, dataDir);
+  if (!gp.deployHardlinks()) {
+    return;
+  }
+
+  // Stale links from a previous run go first; this also handles the case where
+  // the previous session crashed without purging.
+  hardlinkPurge();
+
+  // Flatten directory mappings to file level. Later entries override earlier
+  // ones, matching the USVFS semantics: mods are ordered by priority and the
+  // overwrite mapping is appended last, so it wins exactly like in MO2's UI.
+  QMap<QString, QString> files;  // destination -> source
+  for (const Mapping& m : mappings) {
+    if (m.isDirectory) {
+      const QString destBase = QDir::cleanPath(m.destination);
+      QDirIterator it(m.source, QDir::Files | QDir::NoDotAndDotDot,
+                      QDirIterator::Subdirectories);
+      while (it.hasNext()) {
+        it.next();
+        const QString rel = QDir(m.source).relativeFilePath(it.filePath());
+        files.insert(QDir::cleanPath(destBase + "/" + rel),
+                     QDir::cleanPath(it.filePath()));
+      }
+    } else {
+      files.insert(QDir::cleanPath(m.destination), QDir::cleanPath(m.source));
+    }
+  }
+
+  const QString manifestPath = nxbDeployManifestPath();
+  if (files.isEmpty()) {
+    QFile::remove(manifestPath);
+    return;
+  }
+
+  const QString layer = QDir::cleanPath(gp.layerRoot);
+  QStringList manifest;
+  int links = 0;
+  int copies = 0;
+  int skipped = 0;
+
+  for (auto it = files.constBegin(); it != files.constEnd(); ++it) {
+    const QString& dest = it.key();
+    const QString& src = it.value();
+    if (!QFile::exists(src) || !dest.startsWith(layer, Qt::CaseInsensitive)) {
+      ++skipped;
+      continue;
+    }
+
+    QDir().mkpath(QFileInfo(dest).absolutePath());
+    if (QFile::exists(dest) && !QFile::remove(dest)) {
+      // Not ours (or locked): never clobber a real file, skip instead.
+      log::warn("hardlink deploy: {} exists and cannot be replaced", dest);
+      ++skipped;
+      continue;
+    }
+
+    if (CreateHardLinkW(reinterpret_cast<const wchar_t*>(dest.utf16()),
+                        reinterpret_cast<const wchar_t*>(src.utf16()), nullptr)) {
+      ++links;
+    } else if (QFile::copy(src, dest)) {
+      // Cross-volume fallback: a copy instead of a link, same virtual effect.
+      ++copies;
+    } else {
+      log::warn("hardlink deploy: failed to create {}", dest);
+      ++skipped;
+      continue;
+    }
+    manifest.append(dest);
+  }
+
+  QDir().mkpath(QFileInfo(manifestPath).absolutePath());
+  QFile out(manifestPath);
+  if (out.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    out.write(manifest.join(QLatin1Char('\n')).toUtf8());
+  }
+  log::info("hardlink deploy: {} hardlinks, {} copies, {} skipped ({} total "
+            "virtual files)",
+            links, copies, skipped, files.size());
+}
+
 void OrganizerCore::prepareVFS()
 {
+  hardlinkPurge();
   m_USVFS.updateMapping(fileMapping(m_CurrentProfile->name(), QString()));
 }
 
@@ -1994,8 +2160,13 @@ bool OrganizerCore::beforeRun(
   }
 
   try {
-    m_USVFS.updateMapping(fileMapping(profileName, customOverwrite));
+    const MappingType mappings = fileMapping(profileName, customOverwrite);
+    m_USVFS.updateMapping(mappings);
     m_USVFS.updateForcedLibraries(forcedLibraries);
+
+    // USVFS-independent fallback: materialize the layer with hard links so the
+    // game reads mod files even if injection were unavailable.
+    hardlinkDeploy(mappings);
   } catch (const UsvfsConnectorException& e) {
     log::debug("{}", e.what());
     return false;
@@ -2013,6 +2184,7 @@ bool OrganizerCore::beforeRun(
 
 void OrganizerCore::afterRun(const QFileInfo& binary, DWORD exitCode)
 {
+  hardlinkPurge();
   // need to remove our stored load order because it may be outdated if a
   // foreign tool changed the file time. After removing that file,
   // refreshESPList will use the file time as the order

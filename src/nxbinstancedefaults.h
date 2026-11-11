@@ -121,6 +121,10 @@ inline bool nxbEnsureInstanceDefaults(const QString& iniPath,
   setIfEmpty("VFSContentLayout/layer", "${GAME_ROOT}/data_win32");
   setIfEmpty("VFSContentLayout/routing", "nxb_win32_routing.json");
   setIfEmpty("VFSContentLayout/infer_nested", "true");
+  // Materialize the layer with hard links as well: the game then sees mod
+  // files even if USVFS injection were unavailable, and direct launches work
+  // too. Links are purged via the manifest on game exit / MO2 start.
+  setIfEmpty("VFSContentLayout/deploy", "hardlink");
 
   // Bare destination stays as the fallback for assets the routing table does
   // not know (old mods), never as the primary mechanism.
