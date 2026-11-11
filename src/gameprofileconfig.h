@@ -66,6 +66,9 @@ struct GameProfileConfig
   // engine reads loose files from <game>/data_win32 gets a mod stack that
   // behaves like a normal MO2 Data tree: same relative path = same file, so
   // priorities, conflicts and overwrite keep their usual meaning.
+  bool hardlinkDeploy = false;  // deploy=hardlink: also materialize the layer
+                                // with hard links (USVFS-independent fallback)
+
   QString layerRoot;         // absolute; the engine's loose root, e.g. <game>/data
   QString gameRoot;          // absolute; <game>, for payload that must sit there
   QString routingPath;       // absolute; JSON {"<file name>": "<sub dir>"}
@@ -75,6 +78,8 @@ struct GameProfileConfig
   QSet<QString> routingTopDirs;     // first segment of every dir above (spc, ui, ...)
 
   bool layered() const { return !layerRoot.isEmpty(); }
+
+  bool deployHardlinks() const { return layered() && hardlinkDeploy; }
 
   bool isEmpty() const
   {
@@ -214,6 +219,10 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
       }
     }
   }
+
+  config.hardlinkDeploy =
+      ini.value("VFSContentLayout/deploy").toString().trimmed()
+          .compare("hardlink", Qt::CaseInsensitive) == 0;
 
   const QString save =
       ini.value("VFSGameProfile/save_source").toString().trimmed();
