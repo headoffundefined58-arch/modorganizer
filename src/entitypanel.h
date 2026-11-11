@@ -25,6 +25,7 @@
 #include <QHash>
 #include <QJsonObject>
 #include <QPair>
+#include <QFont>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QString>
@@ -95,6 +96,10 @@ protected:
 private:
   bool loadCatalog();
   void buildMatchIndex();
+  void setActiveGroup(int index);
+  void refreshGroupButtons();
+  QFont boldButtonFont() const;
+  QFont normalButtonFont() const;
   void applyFilter(const QString& text);
   QString label(const QString& key, const QString& fallback) const;
 
@@ -114,6 +119,13 @@ private:
   QPushButton* m_refreshButton = nullptr;
   QTreeWidget* m_tree = nullptr;
   QTimer* m_debounce = nullptr;
+  QHBoxLayout* m_groupBar = nullptr;
+  QVector<QPushButton*> m_groupButtons;
+
+  // Which catalog group (ninja / stage) the flat list shows. Persisted in the
+  // instance ini so the panel reopens where the user left it.
+  int m_activeGroup = 0;
+  QString m_iniPath;
 
   bool m_available = false;
   QJsonObject m_labels;
