@@ -79,30 +79,53 @@ inline bool nxbEnsureInstanceDefaults(const QString& iniPath,
   // The virtual Data root is the game root, not a "Data" subfolder.
   setIfEmpty("VFSCore/data_root_override", "${GAME_ROOT}");
 
-  // Keep Root Builder packages working (they are still valid mods here),
-  // while the core itself maps data_win32/ and loose files natively.
+  // Root/ packages are handled by the projection itself (Root/data_win32 and
+  // Root/data go to the layer, Root/*.dll and friends go to the game root), so
+  // a blanket Root -> game root mapping would map every such mod twice.
   if (!ini.contains("VFSRootMappings/size")) {
     ini.beginWriteArray("VFSRootMappings");
-    ini.setArrayIndex(0);
-    ini.setValue("source", "Root");
-    ini.setValue("destination", "${GAME_ROOT}");
     ini.endArray();
     changed = true;
   }
 
+  // Migration: earlier builds pointed the layer at <game>/data_win32, which this
+  // title does not have (it ships loose files under <game>/data). USVFS then
+  // dropped every mapping with "<layer> doesn't exist" and the game ran fully
+  // unmodded. Rewrite stale values instead of only filling empty ones, so an
+  // existing instance heals itself on the next start.
+  {
+    const QString layerKey = "VFSContentLayout/layer";
+    const QString bareKey  = "VFSContentLayout/bare_destination";
+    const QString looseRoot = QDir::toNativeSeparators(
+        gameRoot.absoluteFilePath("data"));
+
+    if (QDir(looseRoot).exists()) {
+      const QString layer = ini.value(layerKey).toString().trimmed();
+      if (layer.endsWith("data_win32", Qt::CaseInsensitive)) {
+        ini.setValue(layerKey, "${GAME_ROOT}/data");
+        changed = true;
+      }
+      const QString bare = ini.value(bareKey).toString().trimmed();
+      if (bare.contains("data_win32", Qt::CaseInsensitive)) {
+        ini.setValue(bareKey, QString(bare).replace("data_win32", "data"));
+        changed = true;
+      }
+    }
+  }
+
   // Loose community packages (top-level *.xfbin) belong where the game's
-  // mod loader reads them; structured data_win32/ mods keep the native map.
+  // mod loader reads them; structured data/ mods keep the native map.
   // Virtual overlay layer first: without these three keys the instance falls
   // back to the old "bare mods go to spc" behaviour, which is what made the
   // settings dialog show only bare_destination.
-  setIfEmpty("VFSContentLayout/layer", "${GAME_ROOT}/data_win32");
+  setIfEmpty("VFSContentLayout/layer", "${GAME_ROOT}/data");
   setIfEmpty("VFSContentLayout/routing", "nxb_win32_routing.json");
   setIfEmpty("VFSContentLayout/infer_nested", "true");
 
   // Bare destination stays as the fallback for assets the routing table does
   // not know (old mods), never as the primary mechanism.
   setIfEmpty("VFSContentLayout/bare_destination",
-             "${GAME_ROOT}/data_win32/spc");
+             "${GAME_ROOT}/data/spc");
   setIfEmpty("VFSContentLayout/bare_patterns", "*.xfbin;*.dds;*.png;*.tex");
   setIfEmpty("VFSContentLayout/layout_markers",
              "data_win32;data;moddingapi;Root;engine");

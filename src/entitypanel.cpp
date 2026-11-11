@@ -449,7 +449,7 @@ void EntityPanel::refresh()
                                   .arg(group.name)
                                   .arg(groupModified)
                                   .arg(group.entries.size()));
-        m_tree->setFirstItemColumnSpanned(groupItem, true);
+        groupItem->setFirstColumnSpanned(true);
         groupItem->setBackground(0, QBrush(QColor(0xE8, 0xEE, 0xF7)));
         groupItem->setSizeHint(0, QSize(0, 30));
       }
