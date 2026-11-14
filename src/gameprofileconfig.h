@@ -70,6 +70,12 @@ struct GameProfileConfig
   // about, so they are left out of the layer entirely.
   // Config: VFSContentLayout/compile_add_mods=true
   bool compileAddMods = true;
+  // Package-internal folders that must never be projected into the game:
+  // NSC packages keep their build inputs (CPKs/, Files/, Shaders/), model
+  // sources and preview screenshots next to the real payload. Dropping those
+  // into the layer only pollutes it (and used to land under <layer>/spc).
+  // Config: VFSContentLayout/skip_dirs="Resources;Screenshots;Models"
+  QStringList skipDirs;
   QString saveSource;        // absolute; the game's real save directory
   QString savePattern;       // e.g. "stormc.s", "*.sav"
   bool savePerProfile = false;
@@ -187,6 +193,10 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
       ini.value("VFSContentLayout/root_dirs", "moddingapi").toString());
   config.compileAddMods =
       ini.value("VFSContentLayout/compile_add_mods", true).toBool();
+  config.skipDirs = gpSplitList(
+      ini.value("VFSContentLayout/skip_dirs",
+                "Resources;Screenshots;Models")
+          .toString());
 
   // ---- virtual overlay layer ----
   const QString layer =
@@ -430,6 +440,16 @@ inline void gpSplitRootDirs(const QDir& dir, const GameProfileConfig& config,
   }
   QStringList keep;
   for (const QString& sub : dirs) {
+    bool isSkip = false;
+    for (const QString& wanted : config.skipDirs) {
+      if (sub.compare(wanted, Qt::CaseInsensitive) == 0) {
+        isSkip = true;
+        break;
+      }
+    }
+    if (isSkip) {
+      continue;  // package-internal folder: dropped, never mapped
+    }
     bool isRootDir = false;
     for (const QString& wanted : config.rootDirs) {
       if (sub.compare(wanted, Qt::CaseInsensitive) == 0) {
@@ -538,7 +558,11 @@ inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
       continue;
     }
 
-    const QString destSub = legacy.isEmpty() ? sub : legacy + "/" + sub;
+    // A top-level folder the routing table does not know is still game data
+    // (the community drops packages straight into data_win32/, keeping their
+    // folder names), so it keeps its own name instead of being buried under
+    // <layer>/spc/<name>.
+    const QString destSub = sub;
     out.append({QDir::toNativeSeparators(dir.filePath(sub)),
                 gpLayerPath(config, destSub), true});
   }
@@ -611,12 +635,9 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
     QStringList layerDirs = dirs;
     gpSplitRootDirs(dir, config, layerDirs, out);
     for (const QString& d : layerDirs) {
-      const bool isCategory =
-          config.routingTopDirs.contains(d) || config.routingDirs.contains(d);
-      const QString destSub =
-          isCategory ? d : (legacy.isEmpty() ? d : legacy + "/" + d);
+      // Category folders keep their name; unknown ones do too (see above).
       out.append({QDir::toNativeSeparators(dir.filePath(d)),
-                  gpLayerPath(config, destSub), true});
+                  gpLayerPath(config, d), true});
     }
     for (const QString& name : files) {
       if (!config.gameRoot.isEmpty() && gpIsRootPayload(name) &&
