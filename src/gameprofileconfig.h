@@ -55,6 +55,13 @@ struct GameProfileConfig
   QString bareDestination;   // absolute; empty disables bare-mod normalization
   QStringList barePatterns;  // file names that make a mod "bare"
   QStringList layoutMarkers; // directories that mean "already laid out"
+  // First-level directories inside a mod that must be projected straight into
+  // the game root instead of the loose layer. Loader payload that lives in a
+  // DIRECTORY (not a single file) needs this: gpIsRootPayload() only covers
+  // top-level files, so e.g. "moddingapi/" would otherwise be routed to
+  // <layer>/spc/moddingapi and the runtime would never find it.
+  // Config: VFSContentLayout/root_dirs="moddingapi"
+  QStringList rootDirs;
   QString saveSource;        // absolute; the game's real save directory
   QString savePattern;       // e.g. "stormc.s", "*.sav"
   bool savePerProfile = false;
@@ -167,6 +174,9 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
       ini.value("VFSContentLayout/layout_markers",
                 "data_win32;data;moddingapi;Root;engine")
           .toString());
+  // Directories that bypass the layer and land in <game>/<name>.
+  config.rootDirs = gpSplitList(
+      ini.value("VFSContentLayout/root_dirs", "moddingapi").toString());
 
   // ---- virtual overlay layer ----
   const QString layer =
@@ -376,6 +386,36 @@ inline bool gpIsRootPayload(const QString& fileName)
   return kSuffixes.contains(QFileInfo(fileName).suffix().toLower());
 }
 
+// Split off the first-level directories that belong in the game root
+// (config.rootDirs, e.g. "moddingapi"). They are emitted here and removed from
+// `dirs` so the caller's wrapper/routing heuristics never see them.
+// gpIsRootPayload() handles single files; this is its directory counterpart.
+inline void gpSplitRootDirs(const QDir& dir, const GameProfileConfig& config,
+                            QStringList& dirs,
+                            QVector<GameProfileMapping>& out)
+{
+  if (config.rootDirs.isEmpty() || config.gameRoot.isEmpty()) {
+    return;
+  }
+  QStringList keep;
+  for (const QString& sub : dirs) {
+    bool isRootDir = false;
+    for (const QString& wanted : config.rootDirs) {
+      if (sub.compare(wanted, Qt::CaseInsensitive) == 0) {
+        isRootDir = true;
+        break;
+      }
+    }
+    if (!isRootDir) {
+      keep.append(sub);
+      continue;
+    }
+    out.append({QDir::toNativeSeparators(dir.filePath(sub)),
+                QDir::toNativeSeparators(config.gameRoot + "/" + sub), true});
+  }
+  dirs = keep;
+}
+
 // Project a directory that holds loose payload (no data_win32/ or Root/ inside).
 // Each file is routed by name through the CPK-derived table, which is what lets
 // an unzipped community package land exactly where the engine reads it.
@@ -384,7 +424,11 @@ inline void gpProjectLoose(const QDir& dir, const GameProfileConfig& config,
 {
   const QString legacy      = gpLayerLegacySubdir(config);
   const QStringList allFiles = gpPayloadFiles(dir);
-  const QStringList subdirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+  QStringList subdirs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+  // Directories configured as game-root payload (moddingapi/) are emitted here
+  // and removed from `subdirs`, so the wrapper/category heuristics below never
+  // mistake them for a layer sub directory.
+  gpSplitRootDirs(dir, config, subdirs, out);
 
   // Split loader payload (dll/exe/ini ...) away from asset payload: it belongs
   // in the game root, and it must not make the whole directory look "mixed".
@@ -531,7 +575,11 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
   }
   if (hasCategoryDir) {
     const QString legacy = gpLayerLegacySubdir(config);
-    for (const QString& d : dirs) {
+    // Game-root directories (moddingapi/) are emitted here and taken out of the
+    // layer loop below; a package may legitimately carry both spc/ and them.
+    QStringList layerDirs = dirs;
+    gpSplitRootDirs(dir, config, layerDirs, out);
+    for (const QString& d : layerDirs) {
       const bool isCategory =
           config.routingTopDirs.contains(d) || config.routingDirs.contains(d);
       const QString destSub =
@@ -557,7 +605,19 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
     return out;
   }
 
-  if (config.inferNested && files.isEmpty() && dirs.size() == 1) {
+  // A lone game-root directory (root_dirs, e.g. moddingapi/) is not a wrapper
+  // folder - descending into it would scatter its contents into the layer.
+  bool singleIsRootDir = false;
+  if (dirs.size() == 1) {
+    for (const QString& rootDir : config.rootDirs) {
+      if (dirs.first().compare(rootDir, Qt::CaseInsensitive) == 0) {
+        singleIsRootDir = true;
+        break;
+      }
+    }
+  }
+  if (config.inferNested && files.isEmpty() && dirs.size() == 1 &&
+      !singleIsRootDir) {
     const QDir wrapper(dir.filePath(dirs.first()));
     if (tryLayout(wrapper)) {
       return out;
