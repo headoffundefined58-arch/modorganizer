@@ -299,6 +299,11 @@ public:
 
   ProcessRunner processRunner();
 
+  // MO2 core upgrade: [PreLaunch] -- run the mod compiler (or any command)
+  // when MO2 itself starts the game, before the VFS mappings are computed.
+  // Returns false when the command failed and abort_on_failure is set.
+  bool runPreLaunch();
+
   bool beforeRun(const QFileInfo& binary, const QDir& cwd, const QString& arguments,
                  const QString& profileName, const QString& customOverwrite,
                  const QList<MOBase::ExecutableForcedLoadSetting>& forcedLibraries);

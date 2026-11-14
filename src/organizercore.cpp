@@ -2134,6 +2134,82 @@ ProcessRunner OrganizerCore::processRunner()
   return ProcessRunner(*this, m_UserInterface);
 }
 
+// MO2 core upgrade: [PreLaunch] -------------------------------------------
+// Some engines only see mods that were compiled first (params merged into the
+// game tables, assets packed into CPKs) - the NSC Mod Manager's "Compile Mods
+// And Launch" step. The manager owns that, so it runs here: after the modlist
+// has been written and before fileMapping() is computed, so whatever the
+// compiler drops into a mod folder is mapped by this very launch.
+bool OrganizerCore::runPreLaunch()
+{
+  QSettings ini(gameProfileIniPath(), QSettings::IniFormat);
+  const QString command = ini.value("PreLaunch/command").toString().trimmed();
+  if (command.isEmpty()) {
+    return true;
+  }
+
+  const int timeoutSeconds = ini.value("PreLaunch/timeout_seconds", 1800).toInt();
+  const bool abortOnFailure = ini.value("PreLaunch/abort_on_failure", true).toBool();
+
+  const QDir gameRoot(m_GamePlugin != nullptr ? m_GamePlugin->gameDirectory()
+                                              : QDir::current());
+  const QString profileName =
+      m_CurrentProfile != nullptr ? m_CurrentProfile->name() : QString();
+
+  auto expand = [&](QString text) {
+    text.replace("${GAME_ROOT}", QDir::toNativeSeparators(gameRoot.absolutePath()));
+    text.replace("${PROFILE}", profileName);
+    text.replace("${INSTANCE}", QDir::toNativeSeparators(QDir::currentPath()));
+    return text;
+  };
+
+  const QString program = expand(command);
+  const QStringList arguments =
+      QProcess::splitCommand(expand(ini.value("PreLaunch/args").toString()));
+  const QString workDir = expand(ini.value("PreLaunch/working_directory").toString());
+
+  log::info("[PreLaunch] {} {}", program, arguments.join(QLatin1Char(' ')));
+
+  QProcess process;
+  process.setProgram(program);
+  process.setArguments(arguments);
+  process.setWorkingDirectory(workDir.isEmpty() ? gameRoot.absolutePath() : workDir);
+  process.setProcessChannelMode(QProcess::MergedChannels);
+  process.start();
+
+  if (!process.waitForStarted(30000)) {
+    log::error("[PreLaunch] failed to start \"{}\": {}", program,
+               process.errorString());
+    return !abortOnFailure;
+  }
+
+  const bool finished = process.waitForFinished(timeoutSeconds * 1000);
+  const QByteArray output = process.readAllStandardOutput();
+  if (!output.isEmpty()) {
+    log::info("[PreLaunch] output:\n{}", QString::fromLocal8Bit(output));
+  }
+
+  if (!finished) {
+    log::error("[PreLaunch] timed out after {} s, killed", timeoutSeconds);
+    process.kill();
+    process.waitForFinished(5000);
+    return !abortOnFailure;
+  }
+
+  if (process.exitStatus() != QProcess::NormalExit) {
+    log::error("[PreLaunch] compiler crashed");
+    return !abortOnFailure;
+  }
+
+  if (process.exitCode() != 0) {
+    log::error("[PreLaunch] exited with code {}", process.exitCode());
+    return !abortOnFailure;
+  }
+
+  log::info("[PreLaunch] ok");
+  return true;
+}
+
 bool OrganizerCore::beforeRun(
     const QFileInfo& binary, const QDir& cwd, const QString& arguments,
     const QString& profileName, const QString& customOverwrite,
@@ -2152,6 +2228,14 @@ bool OrganizerCore::beforeRun(
   // need to make sure all data is saved before we start the application
   if (m_CurrentProfile != nullptr) {
     m_CurrentProfile->writeModlistNow(true);
+  }
+
+  // MO2 core upgrade: compile before launch. Runs after the modlist is on disk
+  // and before the mappings below, so compiler output is part of this launch.
+  if (!runPreLaunch()) {
+    log::error("start of \"{}\" cancelled: pre-launch command failed",
+               binary.absoluteFilePath());
+    return false;
   }
 
   if (!m_AboutToRun(binary.absoluteFilePath(), cwd, arguments)) {
@@ -2260,6 +2344,17 @@ std::vector<Mapping> OrganizerCore::fileMapping(const QString& profileName,
 
     if (modPtr->isRegular()) {
       const QString modPath = std::get<1>(mod);
+
+      // MO2 core upgrade: compiler-served packages (nsc_mod.json with kind=add
+      // or globalOverrides) are delivered through the compiled CPK stack, so
+      // they must stay out of the overlay. Mapping their raw fragments would
+      // shadow the game's own tables with unmerged data.
+      if (gameProfile.layered() && gameProfile.compileAddMods &&
+          gameProfileModNeedsCompile(modPath)) {
+        log::debug("layer: skipping compiled mod \"{}\"",
+                   QDir::toNativeSeparators(modPath));
+        continue;
+      }
 
       // MO2 core upgrade: a bare mod (loose game assets, no layout
       // directory) goes into the game-specific destination declared

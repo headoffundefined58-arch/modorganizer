@@ -38,6 +38,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMap>
@@ -62,6 +63,13 @@ struct GameProfileConfig
   // <layer>/spc/moddingapi and the runtime would never find it.
   // Config: VFSContentLayout/root_dirs="moddingapi"
   QStringList rootDirs;
+  // Packages that carry an NSC descriptor (nsc_mod.json with kind=add or a
+  // non-empty globalOverrides) only take effect after they are merged into a
+  // CPK by the compiler. Mapping them into the overlay would shadow the game
+  // with unmerged fragments, which is the breakage the NSC manager warns
+  // about, so they are left out of the layer entirely.
+  // Config: VFSContentLayout/compile_add_mods=true
+  bool compileAddMods = true;
   QString saveSource;        // absolute; the game's real save directory
   QString savePattern;       // e.g. "stormc.s", "*.sav"
   bool savePerProfile = false;
@@ -177,6 +185,8 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
   // Directories that bypass the layer and land in <game>/<name>.
   config.rootDirs = gpSplitList(
       ini.value("VFSContentLayout/root_dirs", "moddingapi").toString());
+  config.compileAddMods =
+      ini.value("VFSContentLayout/compile_add_mods", true).toBool();
 
   // ---- virtual overlay layer ----
   const QString layer =
@@ -285,6 +295,27 @@ inline void gameProfileInvalidateCache()
 {
   std::lock_guard<std::mutex> lock(gpCacheDetail::mutex());
   gpCacheDetail::loaded() = false;
+}
+
+// True when a mod ships an NSC package descriptor that requires the compiler.
+// `kind: add` introduces a new character (roster + params must be merged) and
+// any non-empty `globalOverrides` list touches shared tables; both are only
+// valid after the CPK build, never as loose overlay files.
+inline bool gameProfileModNeedsCompile(const QString& modPath)
+{
+  QFile f(QDir(modPath).filePath("nsc_mod.json"));
+  if (!f.exists() || !f.open(QIODevice::ReadOnly)) {
+    return false;
+  }
+  const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
+  if (!doc.isObject()) {
+    return false;
+  }
+  const QJsonObject obj = doc.object();
+  if (obj.value("kind").toString().compare("add", Qt::CaseInsensitive) == 0) {
+    return true;
+  }
+  return !obj.value("globalOverrides").toArray().isEmpty();
 }
 
 // True when a mod contains loose game assets but no game-layout directory.
