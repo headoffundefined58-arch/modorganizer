@@ -307,6 +307,64 @@ inline void gameProfileInvalidateCache()
   gpCacheDetail::loaded() = false;
 }
 
+// Global param tables. A mod that ships one of these as a loose file is only
+// carrying a FRAGMENT (the toolbox dumps 400-byte slices); the engine reads it
+// as a whole table and dies. They are only valid after the compiler merged
+// them, so such a mod has to go to the compile queue, not the layer.
+inline bool gameProfileShipsGlobalTable(const QString& modPath)
+{
+  static const QSet<QString> kTables{
+      "costumeParam.bin.xfbin",
+      "cmnparam.xfbin",
+      "afterAttachObject.xfbin",
+      "appearanceAnm.xfbin",
+      "awakeAura.xfbin",
+      "characode.bin.xfbin",
+      "conditionprm.bin.xfbin",
+      "costumeBreakColorParam.xfbin",
+      "costumeBreakParam.xfbin",
+      "damageeff.bin.xfbin",
+      "damageprm.bin.xfbin",
+      "duelPlayerParam.xfbin",
+      "effectprm.bin.xfbin",
+      "pairSpSkillCombinationParam.xfbin",
+      "playerDoubleEffectParam.xfbin",
+      "playerSettingParam.bin.xfbin",
+      "player_icon.xfbin",
+      "privateCamera.bin.xfbin",
+      "skillCustomizeParam.xfbin",
+      "skillIndexSettingParam.xfbin",
+      "spSkillCustomizeParam.xfbin",
+      "spTypeSupportParam.xfbin",
+      "supportActionParam.xfbin",
+      "supportSkillRecoverySpeedParam.xfbin",
+      "StageInfo.bin.xfbin",
+      "characterSelectParam.xfbin",
+      "select_stage.xfbin"};
+  const QDir dir(modPath);
+  if (!dir.exists()) {
+    return false;
+  }
+  for (const QFileInfo& fi : dir.entryInfoList(QDir::Files | QDir::Dirs
+                                                   | QDir::NoDotAndDotDot,
+                                               QDir::Name)) {
+    if (fi.isFile()) {
+      if (kTables.contains(fi.fileName())) {
+        return true;
+      }
+      continue;
+    }
+    // one level down covers Models/<model>/data/... layouts
+    const QDir sub(fi.absoluteFilePath());
+    for (const QFileInfo& f2 : sub.entryInfoList(QDir::Files, QDir::Name)) {
+      if (kTables.contains(f2.fileName())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // True when a mod ships an NSC package descriptor that requires the compiler.
 // `kind: add` introduces a new character (roster + params must be merged) and
 // any non-empty `globalOverrides` list touches shared tables; both are only

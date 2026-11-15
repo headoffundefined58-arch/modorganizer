@@ -2350,7 +2350,8 @@ std::vector<Mapping> OrganizerCore::fileMapping(const QString& profileName,
       // they must stay out of the overlay. Mapping their raw fragments would
       // shadow the game's own tables with unmerged data.
       if (gameProfile.layered() && gameProfile.compileAddMods &&
-          gameProfileModNeedsCompile(modPath)) {
+          (gameProfileModNeedsCompile(modPath) ||
+           gameProfileShipsGlobalTable(modPath))) {
         log::debug("layer: skipping compiled mod \"{}\"",
                    QDir::toNativeSeparators(modPath));
         continue;
