@@ -195,7 +195,7 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
       ini.value("VFSContentLayout/compile_add_mods", true).toBool();
   config.skipDirs = gpSplitList(
       ini.value("VFSContentLayout/skip_dirs",
-                "Resources;Screenshots;Models")
+                "Resources;Screenshots")
           .toString());
 
   // ---- virtual overlay layer ----
@@ -606,6 +606,30 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
                     QDir::toNativeSeparators(config.gameRoot), true});
       }
       return true;
+    }
+    // Nested data root: toolbox-built packages keep the real tree one level
+    // down (Models/<model>/data/spc/...). That `data/` folder IS the layer
+    // root, exactly like data_win32/ above - strip the wrapper instead of
+    // dropping the payload. Folders listed in skip_dirs (Resources/, whose
+    // Files/data is build input) are not candidates.
+    const QStringList subs = base.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& sub : subs) {
+      bool skip = false;
+      for (const QString& wanted : config.skipDirs) {
+        if (sub.compare(wanted, Qt::CaseInsensitive) == 0) {
+          skip = true;
+          break;
+        }
+      }
+      if (skip) {
+        continue;
+      }
+      const QDir inner(base.filePath(sub));
+      if (inner.exists("data")) {
+        out.append({QDir::toNativeSeparators(inner.filePath("data")),
+                    gpLayerPath(config, QString()), true});
+        return true;
+      }
     }
     return false;
   };
