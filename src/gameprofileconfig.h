@@ -195,7 +195,7 @@ inline GameProfileConfig gameProfileLoadConfig(const QDir& gameRoot,
       ini.value("VFSContentLayout/compile_add_mods", true).toBool();
   config.skipDirs = gpSplitList(
       ini.value("VFSContentLayout/skip_dirs",
-                "Resources;Screenshots")
+                "Screenshots")
           .toString());
 
   // ---- virtual overlay layer ----
@@ -683,8 +683,18 @@ inline QVector<GameProfileMapping> gameProfileModMappings(
         continue;
       }
       const QDir inner(base.filePath(sub));
+      // <sub>/data            e.g. Models/5obt_03/data/spc/...
       if (inner.exists("data")) {
         out.append({QDir::toNativeSeparators(inner.filePath("data")),
+                    gpLayerPath(config, QString()), true});
+        return true;
+      }
+      // <sub>/Files/data      NSC packages keep the real payload under
+      // Resources/Files/data while Resources/CPKs and Resources/Shaders are
+      // build inputs. Descend into the payload, do not drop the folder.
+      const QDir files(inner.filePath("Files"));
+      if (inner.exists("Files") && files.exists("data")) {
+        out.append({QDir::toNativeSeparators(files.filePath("data")),
                     gpLayerPath(config, QString()), true});
         return true;
       }
