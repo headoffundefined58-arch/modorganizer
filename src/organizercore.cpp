@@ -2316,6 +2316,21 @@ std::vector<Mapping> OrganizerCore::fileMapping(const QString& profileName,
   const VFSCoreConfig& vfsConfig = vfsCoreCachedConfig(gameRoot, dataDir);
   const GameProfileConfig gameProfile = gameProfileSnapshot(gameRoot, dataDir);
 
+  // USVFS silently drops every mapping whose destination does not exist, so a
+  // missing layer root turns into "no mods at all" with no error anywhere.
+  // Create it instead of depending on it being on disk already.
+  if (gameProfile.layered()) {
+    const QString layerRoot =
+        QDir::fromNativeSeparators(gpLayerPath(gameProfile, QString()));
+    if (!layerRoot.isEmpty() && !QDir(layerRoot).exists()) {
+      if (QDir().mkpath(layerRoot)) {
+        log::info("layer: created missing root \"{}\"", layerRoot);
+      } else {
+        log::error("layer: cannot create root \"{}\"", layerRoot);
+      }
+    }
+  }
+
   QStringList dataPaths;
   if (vfsConfig.dataRootOverride.isEmpty()) {
     dataPaths.append(
